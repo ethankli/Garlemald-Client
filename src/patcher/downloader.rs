@@ -17,7 +17,10 @@ pub enum DownloadResult {
     Cancelled,
 }
 
-/// Live progress snapshot for a single download.
+/// Live progress snapshot for a single download. Cheap to clone — the
+/// internal counters are shared via `Arc`s so UI threads can observe them
+/// while a worker thread runs the transfer.
+#[derive(Clone)]
 pub struct DownloadProgress {
     pub bytes_downloaded: Arc<AtomicU64>,
     pub cancel_flag: Arc<AtomicBool>,
@@ -38,6 +41,16 @@ impl DownloadProgress {
     pub fn bytes(&self) -> u64 {
         self.bytes_downloaded.load(Ordering::Relaxed)
     }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel_flag.load(Ordering::Relaxed)
+    }
+}
+
+impl Default for DownloadProgress {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 pub struct Downloader {
@@ -55,8 +68,20 @@ impl Downloader {
         Self { progress: DownloadProgress::new() }
     }
 
+    /// Reuses an existing progress handle — use when the caller wants to
+    /// watch the transfer from another thread.
+    pub fn with_progress(progress: DownloadProgress) -> Self {
+        Self { progress }
+    }
+
     pub fn progress(&self) -> &DownloadProgress {
         &self.progress
+    }
+
+    /// Returns a cloned handle to the progress atomics, suitable for reading
+    /// from a UI thread while `download()` runs on a worker thread.
+    pub fn share_progress(&self) -> DownloadProgress {
+        self.progress.clone()
     }
 
     /// Downloads `src_url` into `dst_path`, skipping the download if the
