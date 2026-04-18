@@ -94,6 +94,14 @@ mod tests {
         let van = defs.get("Van Darnus Server").expect("Van Darnus present");
         assert_eq!(van.address, "vandarnus.seventhumbral.org");
         assert_eq!(van.login_url, "https://vandarnus.seventhumbral.org/login.php");
+
+        // Localhost is the sibling garlemald-server's default bind; it
+        // should sort first alphabetically so new users pick it up on the
+        // empty-preferences code path.
+        let local = defs.get("Localhost").expect("Localhost present");
+        assert_eq!(local.address, "127.0.0.1");
+        let first = defs.iter().next().expect("at least one server");
+        assert_eq!(first.name, "Localhost");
     }
 
     #[test]

@@ -1,3 +1,4 @@
 <Servers>
+	<Server Name="Localhost" Address="127.0.0.1" LoginUrl="" />
 	<Server Name="Van Darnus Server" Address="vandarnus.seventhumbral.org" LoginUrl="https://vandarnus.seventhumbral.org/login.php" />
 </Servers>

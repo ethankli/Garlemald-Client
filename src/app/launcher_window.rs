@@ -6,7 +6,7 @@ use eframe::egui;
 
 use crate::app::patcher_window::PatcherScreen;
 use crate::app::settings_window::{SettingsModal, SettingsOutcome};
-use crate::config::{data_dir, preferences_file_path, Preferences};
+use crate::config::{bundled_config_path, data_dir, preferences_file_path, Preferences};
 use crate::launcher::GameLaunchRequest;
 use crate::login::{LoginOutcome, LoginTask};
 use crate::patcher::check_game_version;
@@ -71,7 +71,20 @@ impl LauncherApp {
     fn new() -> Self {
         let prefs_path =
             preferences_file_path().unwrap_or_else(|_| PathBuf::from("preferences.toml"));
-        let prefs = Preferences::load(&prefs_path).unwrap_or_default();
+        // Fall back to the repo-bundled `./configs/garlemald-client.toml` on
+        // first run — that file ships localhost defaults matching the
+        // sibling garlemald-server, so a fresh clone of both repos boots
+        // end-to-end without user configuration.
+        let prefs = if prefs_path.exists() {
+            Preferences::load(&prefs_path).unwrap_or_default()
+        } else {
+            let bundled = bundled_config_path();
+            if bundled.exists() {
+                Preferences::load(&bundled).unwrap_or_default()
+            } else {
+                Preferences::default()
+            }
+        };
         let servers = ServerDefinitions::load_default().unwrap_or_default();
         let detected_install = current_platform().detect_game_install();
 

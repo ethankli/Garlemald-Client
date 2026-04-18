@@ -23,3 +23,11 @@ pub fn preferences_file_path() -> Result<PathBuf> {
 pub fn servers_file_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("servers.xml"))
 }
+
+/// Path to the repo-bundled starter config (`./configs/garlemald-client.toml`
+/// next to the binary). Used as a fallback when the per-user preferences
+/// file doesn't exist yet — mirrors the server's `configs/*.toml` layout so
+/// a fresh clone picks up matching localhost defaults for lobby/world/map.
+pub fn bundled_config_path() -> PathBuf {
+    PathBuf::from("./configs/garlemald-client.toml")
+}
