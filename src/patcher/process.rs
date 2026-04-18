@@ -3,10 +3,11 @@
 //! them in sorted order) lives in the UI layer since it needs to report
 //! progress to the user.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 
 use crate::version::{FFXIV_BOOT_VERSION, FFXIV_GAME_VERSION};
 
@@ -25,6 +26,84 @@ impl PatchPlan {
         paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
         Ok(Self { patches_in_order: paths })
     }
+
+    /// Builds a plan from a user-chosen local directory by scanning
+    /// recursively for each manifest entry's leaf filename. Missing files
+    /// return an error listing what was not found; the caller is expected to
+    /// validate sizes/CRCs separately.
+    pub fn from_local_source(source_dir: &Path) -> Result<Self> {
+        let index = index_patches_by_leaf(source_dir)?;
+        let mut paths = Vec::with_capacity(crate::patcher::manifest::PATCH_MANIFEST.len());
+        let mut missing = Vec::new();
+        for entry in crate::patcher::manifest::PATCH_MANIFEST {
+            let leaf = leaf_name(entry.path);
+            match index.get(leaf) {
+                Some(p) => paths.push(p.clone()),
+                None => missing.push(leaf.to_string()),
+            }
+        }
+        if !missing.is_empty() {
+            return Err(anyhow!(
+                "{} patch file(s) missing from {}: {}",
+                missing.len(),
+                source_dir.display(),
+                summarize_names(&missing),
+            ));
+        }
+        paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+        Ok(Self { patches_in_order: paths })
+    }
+}
+
+fn leaf_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+fn summarize_names(names: &[String]) -> String {
+    const MAX_SHOWN: usize = 4;
+    if names.len() <= MAX_SHOWN {
+        return names.join(", ");
+    }
+    let head = names[..MAX_SHOWN].join(", ");
+    format!("{head}, … ({} more)", names.len() - MAX_SHOWN)
+}
+
+/// Walks `source_dir` recursively, returning a map of leaf filename → full
+/// path for every `*.patch` file. If two files share the same leaf, the first
+/// one encountered wins; the alternative is to fail, but in practice users
+/// aren't expected to have duplicates in a single install.
+fn index_patches_by_leaf(source_dir: &Path) -> Result<HashMap<String, PathBuf>> {
+    if !source_dir.is_dir() {
+        return Err(anyhow!(
+            "local patch source is not a directory: {}",
+            source_dir.display()
+        ));
+    }
+    let mut out = HashMap::new();
+    let mut stack = vec![source_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = fs::read_dir(&dir)
+            .with_context(|| format!("reading {}", dir.display()))?;
+        for entry in entries {
+            let entry = entry
+                .with_context(|| format!("iterating {}", dir.display()))?;
+            let ty = entry.file_type()
+                .with_context(|| format!("stat {}", entry.path().display()))?;
+            if ty.is_dir() {
+                stack.push(entry.path());
+            } else if ty.is_file() {
+                let path = entry.path();
+                let is_patch = path.extension().and_then(|e| e.to_str()) == Some("patch");
+                if let (true, Some(name)) = (
+                    is_patch,
+                    path.file_name().and_then(|n| n.to_str()).map(String::from),
+                ) {
+                    out.entry(name).or_insert(path);
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Returns `true` when the game's on-disk `game.ver` matches our expected version.
@@ -84,5 +163,35 @@ mod tests {
         let mut sorted = leaves.clone();
         sorted.sort();
         assert_eq!(leaves, sorted);
+    }
+
+    #[test]
+    fn local_plan_finds_patches_in_nested_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Drop every manifest patch into an arbitrary nested subdir to make
+        // sure the recursive scan finds them regardless of layout.
+        let sub = tmp.path().join("some/deeply/nested/dir");
+        fs::create_dir_all(&sub).unwrap();
+        for entry in crate::patcher::manifest::PATCH_MANIFEST {
+            let leaf = entry.path.rsplit('/').next().unwrap();
+            fs::write(sub.join(leaf), b"").unwrap();
+        }
+        let plan = PatchPlan::from_local_source(tmp.path()).unwrap();
+        assert_eq!(
+            plan.patches_in_order.len(),
+            crate::patcher::manifest::PATCH_MANIFEST.len()
+        );
+    }
+
+    #[test]
+    fn local_plan_errors_when_patches_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = PatchPlan::from_local_source(tmp.path());
+        let err = match result {
+            Ok(_) => panic!("expected error for empty directory"),
+            Err(e) => e,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("missing"), "got {msg}");
     }
 }

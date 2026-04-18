@@ -11,6 +11,7 @@ use crate::launcher::GameLaunchRequest;
 use crate::login::{LoginOutcome, LoginTask};
 use crate::patcher::check_game_version;
 use crate::patcher::manifest::total_bytes;
+use crate::patcher::PatchSource;
 use crate::platform::{current as current_platform, Platform};
 use crate::servers::ServerDefinitions;
 use crate::version::{APP_NAME, APP_VERSION, FFXIV_GAME_VERSION};
@@ -197,7 +198,51 @@ impl LauncherApp {
         };
         self.prefs.launcher.patch_download_dir = Some(download_dir.clone());
         self.save_preferences();
-        self.screen = Screen::Patcher(PatcherScreen::start(game_dir, download_dir));
+        self.screen = Screen::Patcher(PatcherScreen::start(
+            game_dir,
+            PatchSource::Download { download_dir },
+        ));
+    }
+
+    /// Kicks off the patcher against a user-chosen local directory that
+    /// already contains every manifest patch (e.g., another FFXIV 1.x install
+    /// with a populated patch cache). Validates sizes + CRCs before applying.
+    fn kick_off_local_patcher(&mut self, source_dir: PathBuf) {
+        let Some(game_dir) = self.resolved_game_location() else {
+            self.set_error("No game location set.");
+            return;
+        };
+        self.screen = Screen::Patcher(PatcherScreen::start(
+            game_dir,
+            PatchSource::Local { source_dir },
+        ));
+    }
+
+    /// Opens a folder picker for the user's existing patch cache, then
+    /// starts the patcher in local-install mode once a folder is chosen.
+    fn start_local_install(&mut self) {
+        let game_dir = match self.resolved_game_location() {
+            Some(dir) => dir,
+            None => {
+                self.set_error("No game location set. Use Game Settings to pick one.");
+                return;
+            }
+        };
+        let platform = current_platform();
+        if !platform.is_valid_game_location(&game_dir) {
+            self.set_error(format!(
+                "'{}' doesn't look like an FFXIV install (no ffxivboot.exe).",
+                game_dir.display()
+            ));
+            return;
+        }
+        let Some(source) = rfd::FileDialog::new()
+            .set_title("Select folder containing existing FFXIV 1.x patches")
+            .pick_folder()
+        else {
+            return;
+        };
+        self.kick_off_local_patcher(source);
     }
 
     fn launch_via_login(&mut self) {
@@ -354,6 +399,9 @@ impl LauncherApp {
         ui.horizontal(|ui| {
             if ui.button("Check for Updates").clicked() {
                 self.start_update();
+            }
+            if ui.button("Install from Local Patches…").clicked() {
+                self.start_local_install();
             }
             let login_in_flight = self.login_task.is_some();
             let launch_button = egui::Button::new(if login_in_flight {

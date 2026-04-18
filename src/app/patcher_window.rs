@@ -11,7 +11,7 @@ use std::time::Instant;
 use eframe::egui;
 
 use crate::patcher::manifest::PATCH_MANIFEST;
-use crate::patcher::{start_patcher_worker, PatcherShared, Phase};
+use crate::patcher::{start_patcher_worker, PatchSource, PatcherShared, Phase};
 
 pub struct PatcherScreen {
     shared: Arc<PatcherShared>,
@@ -25,9 +25,9 @@ pub struct PatcherScreen {
 }
 
 impl PatcherScreen {
-    pub fn start(game_dir: PathBuf, download_dir: PathBuf) -> Self {
+    pub fn start(game_dir: PathBuf, source: PatchSource) -> Self {
         let shared = PatcherShared::new();
-        let worker = start_patcher_worker(shared.clone(), game_dir, download_dir);
+        let worker = start_patcher_worker(shared.clone(), game_dir, source);
         Self {
             shared,
             _worker: worker,
@@ -113,27 +113,32 @@ impl PatcherScreen {
         let fraction = (downloaded as f64 / total_bytes as f64).clamp(0.0, 1.0);
 
         let status = match phase {
-            Phase::Starting => "Starting download…".to_string(),
-            Phase::Downloading => {
+            Phase::Starting => "Starting…".to_string(),
+            Phase::Downloading | Phase::Validating => {
                 let idx = self.shared.download_idx.load(Ordering::Acquire);
                 let entry = PATCH_MANIFEST.get(idx);
                 let current = self.shared.download.bytes();
+                let verb = if phase == Phase::Validating {
+                    "Validating"
+                } else {
+                    "Downloading"
+                };
                 match entry {
                     Some(entry) => {
                         let name = leaf_name(entry.path);
                         format!(
-                            "Downloading {name} ({}/{}) @ {}/s",
+                            "{verb} {name} ({}/{}) @ {}/s",
                             format_kb(current),
                             format_kb(entry.size),
                             format_kb(self.smoothed_rate_bytes_per_sec as u64),
                         )
                     }
-                    None => "Downloading…".to_string(),
+                    None => format!("{verb}…"),
                 }
             }
-            Phase::Patching | Phase::Done => "Download complete.".to_string(),
-            Phase::Error => "Download interrupted by error.".to_string(),
-            Phase::Cancelled => "Download cancelled.".to_string(),
+            Phase::Patching | Phase::Done => "Patches ready.".to_string(),
+            Phase::Error => "Interrupted by error.".to_string(),
+            Phase::Cancelled => "Cancelled.".to_string(),
         };
 
         ui.label(status);
@@ -147,7 +152,7 @@ impl PatcherScreen {
         let total = self.shared.total_patches.max(1);
         let idx = self.shared.patch_idx.load(Ordering::Acquire);
         let fraction = match phase {
-            Phase::Starting | Phase::Downloading => 0.0,
+            Phase::Starting | Phase::Downloading | Phase::Validating => 0.0,
             Phase::Patching => (idx as f64 / total as f64).clamp(0.0, 1.0),
             Phase::Done => 1.0,
             Phase::Error | Phase::Cancelled => (idx as f64 / total as f64).clamp(0.0, 1.0),
@@ -156,6 +161,9 @@ impl PatcherScreen {
         let status = match phase {
             Phase::Starting | Phase::Downloading => {
                 "Patcher waiting for download to complete…".to_string()
+            }
+            Phase::Validating => {
+                "Patcher waiting for local patches to be validated…".to_string()
             }
             Phase::Patching => PATCH_MANIFEST
                 .get(idx)
