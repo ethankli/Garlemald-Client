@@ -1,35 +1,44 @@
 //! Port of `SeventhUmbral/launcher/PatchFile.cpp` — the FFXIV 1.x "ZIPATCH"
 //! incremental-update file format.
 //!
-//! A patch is a 16-byte header (`91 5A 49 50 41 54 43 48` + 8 magic bytes)
-//! followed by a stream of 4-byte command tags, each with a chunk of
-//! command-specific payload:
+//! A patch starts with a 12-byte signature (`91 5A 49 50 41 54 43 48 0D 0A 1A 0A`,
+//! PNG-inspired) followed by a stream of PNG-style chunks:
+//!
+//! | field  | bytes | notes                                             |
+//! |--------|-------|---------------------------------------------------|
+//! | size   | 4 BE  | length of `body`                                  |
+//! | tag    | 4     | chunk type: FHDR / APLY / APFS / ADIR / DELD / ETRY |
+//! | body   | size  | command-specific payload                          |
+//! | crc    | 4 BE  | CRC32 of `tag` + `body` (we don't verify)         |
+//!
+//! Top-level chunks we care about:
 //!
 //! | tag    | semantics                                                        |
 //! |--------|------------------------------------------------------------------|
-//! | FHDR   | file header / version indicator (we assert 0x0200)               |
-//! | DIFF   | 5×u32 of metadata we ignore                                      |
-//! | HIST   | 5×u32 of metadata we ignore                                      |
-//! | APLY   | 5×u32 of metadata we ignore                                      |
-//! | ADIR   | "add directory": big-endian u32 pathlen, path, 16 bytes metadata |
+//! | FHDR   | file header / version indicator (body opaque, we skip it)        |
+//! | APLY   | opaque header metadata (two APLY chunks always follow FHDR)      |
+//! | APFS   | opaque filesystem metadata (observed in some patches)            |
+//! | ADIR   | "add directory": `pathlen:u32 BE, path, trailing metadata`       |
 //! | DELD   | "delete directory": same layout as ADIR                          |
 //! | ETRY   | per-file entry: path + one-or-more file-body records             |
 //!
-//! An ETRY file-body record is:
+//! An ETRY body is:
+//! `pathLen:u32 BE, path, itemCount:u32 BE, items`. Each item:
 //! `hashMode:u32 LE` (0x41/0x44/0x4D) + 20-byte src hash + 20-byte dst hash +
 //! `compressionMode:u32 LE` (0x4E=none, 0x5A=zlib) + `compressedSize:u32 BE` +
-//! `previousSize:u32 BE` + `newSize:u32 BE`. Only the last record in the entry
-//! carries a non-zero compressedSize with the actual body bytes; the ETRY
-//! payload ends with a trailing 8 bytes we skip.
+//! `previousSize:u32 BE` + `newSize:u32 BE`. Only the last item in the entry
+//! carries a non-zero compressedSize with the actual body bytes.
 
 use std::fs::{self, File};
-use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use flate2::read::ZlibDecoder;
 
-const MAGIC: [u8; 8] = [0x91, b'Z', b'I', b'P', b'A', b'T', b'C', b'H'];
+const MAGIC: [u8; 12] = [
+    0x91, b'Z', b'I', b'P', b'A', b'T', b'C', b'H', 0x0D, 0x0A, 0x1A, 0x0A,
+];
 
 #[derive(Debug, Default)]
 pub struct PatchApplyResult {
@@ -41,49 +50,55 @@ pub fn apply_patch_file(patch_path: &Path, game_root: &Path) -> Result<PatchAppl
         .with_context(|| format!("opening patch file {}", patch_path.display()))?;
     let mut reader = BufReader::new(file);
 
-    let mut header = [0u8; 16];
-    reader.read_exact(&mut header).context("reading ZIPATCH header")?;
-    if header[..8] != MAGIC {
+    let mut sig = [0u8; 12];
+    reader.read_exact(&mut sig).context("reading ZIPATCH signature")?;
+    if sig != MAGIC {
         return Err(anyhow!("{} is not a ZIPATCH patch file", patch_path.display()));
     }
 
     let mut result = PatchApplyResult::default();
 
     loop {
+        let size = match try_read_u32_be(&mut reader)? {
+            Some(s) => s as u64,
+            None => break,
+        };
         let mut tag = [0u8; 4];
-        match reader.read_exact(&mut tag) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-            Err(e) => return Err(e.into()),
-        }
+        reader.read_exact(&mut tag).context("reading chunk tag")?;
+
+        let mut body = (&mut reader).take(size);
         match &tag {
-            b"FHDR" => execute_fhdr(&mut reader)?,
-            b"DIFF" | b"HIST" | b"APLY" => skip_bytes(&mut reader, 5 * 4)?,
-            b"ADIR" => execute_adir(&mut reader, game_root, &mut result)?,
-            b"DELD" => execute_deld(&mut reader, game_root, &mut result)?,
-            b"ETRY" => execute_etry(&mut reader, game_root, &mut result)?,
+            b"FHDR" | b"APLY" | b"APFS" => {
+                // Opaque top-level metadata we don't use — drained below.
+            }
+            b"ADIR" => execute_adir(&mut body, game_root, &mut result)?,
+            b"DELD" => execute_deld(&mut body, game_root, &mut result)?,
+            b"ETRY" => execute_etry(&mut body, game_root, &mut result)?,
             other => {
                 return Err(anyhow!(
-                    "unhandled ZIPATCH command: {:?}",
+                    "unhandled ZIPATCH chunk: {:?}",
                     String::from_utf8_lossy(other)
                 ));
             }
         }
+        // Drain any bytes the handler didn't consume so the next chunk's size
+        // lands at the right offset.
+        io::copy(&mut body, &mut io::sink()).context("draining chunk body")?;
+
+        // Skip the chunk's trailing CRC32. We don't verify it.
+        let mut crc = [0u8; 4];
+        reader.read_exact(&mut crc).context("reading chunk CRC")?;
     }
 
     Ok(result)
 }
 
-fn execute_fhdr<R: Read>(reader: &mut R) -> Result<()> {
-    let version = read_u32_be(reader)?;
-    if version != 0x0200 {
-        return Err(anyhow!("unexpected FHDR version: 0x{version:X}"));
-    }
-    Ok(())
-}
-
-fn execute_adir<R: Read>(reader: &mut R, game_root: &Path, result: &mut PatchApplyResult) -> Result<()> {
-    let (path, _meta) = read_dir_command(reader)?;
+fn execute_adir<R: Read>(
+    reader: &mut R,
+    game_root: &Path,
+    result: &mut PatchApplyResult,
+) -> Result<()> {
+    let path = read_dir_path(reader)?;
     let full = join_patch_path(game_root, &path);
     if full.exists() {
         result.messages.push(format!(
@@ -97,8 +112,12 @@ fn execute_adir<R: Read>(reader: &mut R, game_root: &Path, result: &mut PatchApp
     Ok(())
 }
 
-fn execute_deld<R: Read>(reader: &mut R, game_root: &Path, result: &mut PatchApplyResult) -> Result<()> {
-    let (path, _meta) = read_dir_command(reader)?;
+fn execute_deld<R: Read>(
+    reader: &mut R,
+    game_root: &Path,
+    result: &mut PatchApplyResult,
+) -> Result<()> {
+    let path = read_dir_path(reader)?;
     let full = join_patch_path(game_root, &path);
     if !full.exists() {
         result.messages.push(format!(
@@ -112,7 +131,7 @@ fn execute_deld<R: Read>(reader: &mut R, game_root: &Path, result: &mut PatchApp
     Ok(())
 }
 
-fn execute_etry<R: Read + Seek>(
+fn execute_etry<R: Read>(
     reader: &mut R,
     game_root: &Path,
     result: &mut PatchApplyResult,
@@ -176,17 +195,12 @@ fn execute_etry<R: Read + Seek>(
         writer.flush()?;
     }
 
-    // Trailing 8 bytes of per-entry metadata we don't use.
-    reader.seek(SeekFrom::Current(8))?;
     Ok(())
 }
 
-fn read_dir_command<R: Read>(reader: &mut R) -> Result<(String, [u8; 16])> {
+fn read_dir_path<R: Read>(reader: &mut R) -> Result<String> {
     let path_len = read_u32_be(reader)? as usize;
-    let path = read_path(reader, path_len)?;
-    let mut meta = [0u8; 16];
-    reader.read_exact(&mut meta)?;
-    Ok((path, meta))
+    read_path(reader, path_len)
 }
 
 fn read_path<R: Read>(reader: &mut R, len: usize) -> Result<String> {
@@ -204,10 +218,13 @@ fn join_patch_path(game_root: &Path, rel: &str) -> PathBuf {
     game_root.join(normalized)
 }
 
-fn skip_bytes<R: Read>(reader: &mut R, n: usize) -> Result<()> {
-    let mut buf = vec![0u8; n];
-    reader.read_exact(&mut buf)?;
-    Ok(())
+fn try_read_u32_be<R: Read>(reader: &mut R) -> Result<Option<u32>> {
+    let mut buf = [0u8; 4];
+    match reader.read_exact(&mut buf) {
+        Ok(()) => Ok(Some(u32::from_be_bytes(buf))),
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn read_u32_be<R: Read>(reader: &mut R) -> Result<u32> {
