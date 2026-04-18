@@ -119,12 +119,15 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn rva_to_file_offset(pe: &PeFile32<'_>, rva: u32) -> Option<u64> {
+    // `ObjectSection::address()` returns image_base + RVA for PE, not the RVA
+    // itself — normalize by subtracting the image base so we compare RVAs.
+    let image_base = pe.relative_address_base() as u32;
     for section in pe.sections() {
-        let va = section.address() as u32;
+        let section_rva = (section.address() as u32).checked_sub(image_base)?;
         let vsize = section.size() as u32;
-        if rva >= va && rva < va.saturating_add(vsize) {
+        if rva >= section_rva && rva < section_rva.saturating_add(vsize) {
             let (file_offset, _) = section.file_range()?;
-            return Some(file_offset + (rva - va) as u64);
+            return Some(file_offset + (rva - section_rva) as u64);
         }
     }
     None
