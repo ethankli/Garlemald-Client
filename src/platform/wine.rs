@@ -70,6 +70,11 @@ pub struct WineRuntime {
     pub wineserver_bin: PathBuf,
     /// Additional `DYLD_FALLBACK_LIBRARY_PATH` entries (macOS only).
     pub dyld_fallback_paths: Vec<PathBuf>,
+    /// `gstreamer-1.0` plugin directory shipped in the runtime bundle. When
+    /// `Some`, gets exported as `GST_PLUGIN_PATH` / `GST_PLUGIN_SYSTEM_PATH`
+    /// so Wine's `winegstreamer` finds these instead of any system / brew
+    /// install at a different version.
+    pub gst_plugin_path: Option<PathBuf>,
 }
 
 impl WineRuntime {
@@ -91,6 +96,10 @@ impl WineRuntime {
             let joined = std::env::join_paths(&self.dyld_fallback_paths)
                 .expect("wine runtime dyld paths contain no colons");
             cmd.env("DYLD_FALLBACK_LIBRARY_PATH", joined);
+        }
+        if let Some(plugin_dir) = &self.gst_plugin_path {
+            cmd.env("GST_PLUGIN_PATH", plugin_dir);
+            cmd.env("GST_PLUGIN_SYSTEM_PATH", plugin_dir);
         }
     }
 

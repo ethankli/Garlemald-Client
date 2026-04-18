@@ -88,10 +88,18 @@ impl MacosPlatform {
             wineserver_bin: Self::wineserver_bin()?,
             dyld_fallback_paths: vec![
                 runtime_root.join("Frameworks"),
+                // GStreamer dylibs live inside the framework at this path; without
+                // it, `winegstreamer.so` fails to dlopen `libgstreamer-1.0.0.dylib`,
+                // every `wg_parser_create` returns failure, and quartz can't build
+                // a splitter for any media file.
+                runtime_root.join("Frameworks/GStreamer.framework/Versions/Current/lib"),
                 runtime_root.join("wswine.bundle/lib"),
                 PathBuf::from("/usr/local/lib"),
                 PathBuf::from("/usr/lib"),
             ],
+            gst_plugin_path: Some(
+                runtime_root.join("Frameworks/GStreamer.framework/Versions/Current/lib/gstreamer-1.0"),
+            ),
         })
     }
 }

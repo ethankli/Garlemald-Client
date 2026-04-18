@@ -36,6 +36,7 @@ impl LinuxPlatform {
             wine_bin,
             wineserver_bin,
             dyld_fallback_paths: Vec::new(),
+            gst_plugin_path: None,
         })
     }
 }
