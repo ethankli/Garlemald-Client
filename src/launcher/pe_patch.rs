@@ -2,9 +2,10 @@
 //! `ffxivgame.exe` on disk before running it under Wine. This replaces the
 //! Windows-only WriteProcessMemory flow for non-Windows platforms.
 //!
-//! The two patches are the same as Launcher.cpp: a 5-byte encryption-time
-//! immediate-load patch at RVA 0x9A15E3, and a NUL-terminated host-name
-//! string (max 0x14 bytes) written into the slot at RVA 0xB90110.
+//! The two patches are the same as Launcher.cpp: a 5-byte server-UTC
+//! immediate-load patch at RVA 0x9A15E3 (see `ENCRYPTION_TIME_PATCH_BYTES`),
+//! and a NUL-terminated host-name string (max 0x14 bytes) written into the
+//! slot at RVA 0xB90110.
 
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
@@ -18,8 +19,12 @@ pub const ENCRYPTION_TIME_PATCH_RVA: u32 = 0x9A15E3;
 pub const LOBBY_HOST_NAME_RVA: u32 = 0xB90110;
 pub const LOBBY_HOST_NAME_SLOT_SIZE: usize = 0x14;
 
-/// Canonical encryption-time immediate-load instruction (replaces the call
-/// to GetTickCount with a constant `mov eax, 0x50E0E812`).
+/// Replaces a `call <unix-time-from-GetSystemTimeAsFileTime helper>`
+/// (5-byte `E8 rel32`) with `mov eax, 0x50E0E812` (5-byte `B8 imm32`),
+/// pinning the game's notion of "current server UTC" to
+/// `0x50E0E812` = 1356916754 (2012-12-31 01:19:14 UTC — around the day the
+/// 1.x servers were retired). Without this, the game reads a 2026 timestamp
+/// from the host and rejects it as far in the future of `SERVER_UTC`.
 pub const ENCRYPTION_TIME_PATCH_BYTES: [u8; 5] = [0xB8, 0x12, 0xE8, 0xE0, 0x50];
 
 #[derive(Debug, Clone)]

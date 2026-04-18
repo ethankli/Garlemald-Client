@@ -114,7 +114,7 @@ impl Platform for MacosPlatform {
         ensure_prefix_initialized(&runtime)?;
 
         let tick = monotonic_ms_since_boot();
-        log::info!(
+        log::debug!(
             "launcher tick_count = 0x{tick:08x} ({tick}), blowfish key = \"{:08x}\"",
             tick & !0xFFFF_u32
         );
