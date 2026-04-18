@@ -8,6 +8,7 @@ use crate::app::patcher_window::PatcherScreen;
 use crate::app::settings_window::{SettingsModal, SettingsOutcome};
 use crate::config::{data_dir, preferences_file_path, Preferences};
 use crate::launcher::GameLaunchRequest;
+use crate::login::{LoginOutcome, LoginTask};
 use crate::patcher::check_game_version;
 use crate::platform::{current as current_platform, Platform};
 use crate::servers::ServerDefinitions;
@@ -54,6 +55,7 @@ struct LauncherApp {
     dev_session_id: String,
     screen: Screen,
     settings_modal: Option<SettingsModal>,
+    login_task: Option<LoginTask>,
     last_message: Option<(MessageKind, String)>,
 }
 
@@ -83,7 +85,18 @@ impl LauncherApp {
             dev_session_id: String::new(),
             screen: Screen::Main,
             settings_modal: None,
+            login_task: None,
             last_message: None,
+        }
+    }
+
+    fn resolved_login_url(&self) -> Option<String> {
+        let name = self.selected_server_name.as_ref()?;
+        let def = self.servers.get(name)?;
+        if def.login_url.is_empty() {
+            None
+        } else {
+            Some(def.login_url.clone())
         }
     }
 
@@ -145,7 +158,36 @@ impl LauncherApp {
         self.screen = Screen::Patcher(PatcherScreen::start(game_dir, download_dir));
     }
 
-    fn launch_game_now(&mut self) {
+    fn launch_via_login(&mut self) {
+        if self.login_task.is_some() {
+            self.set_info("Login window already open.");
+            return;
+        }
+        if self.resolved_game_location().is_none() {
+            self.set_error("No game location set.");
+            return;
+        }
+        if self.resolved_server_address().is_none() {
+            self.set_error("No server address selected.");
+            return;
+        }
+        let Some(login_url) = self.resolved_login_url() else {
+            self.set_error(
+                "Selected server has no login URL. Use the developer session-id override.",
+            );
+            return;
+        };
+        self.save_preferences();
+        match LoginTask::start(login_url.clone()) {
+            Ok(task) => {
+                self.login_task = Some(task);
+                self.set_info(format!("Opening login page: {login_url}"));
+            }
+            Err(e) => self.set_error(format!("Failed to open login window: {e}")),
+        }
+    }
+
+    fn launch_game_with_session(&mut self, session_id: String) {
         let Some(game_dir) = self.resolved_game_location() else {
             self.set_error("No game location set.");
             return;
@@ -154,25 +196,53 @@ impl LauncherApp {
             self.set_error("No server address selected.");
             return;
         };
-        let session_id = self.dev_session_id.trim();
-        if session_id.len() != crate::crypto::SESSION_ID_LEN {
-            self.set_error(format!(
-                "Session ID must be {} characters (login webview isn't wired up yet — paste one manually).",
-                crate::crypto::SESSION_ID_LEN,
-            ));
-            return;
-        }
         let request = GameLaunchRequest {
             game_dir: game_dir.clone(),
             lobby_host: server_address.clone(),
-            session_id: session_id.to_string(),
+            session_id,
         };
-        self.save_preferences();
         match crate::launcher::launch_game(&request) {
             Ok(()) => self.set_info(format!(
                 "Launched ffxivgame.exe against {server_address}."
             )),
             Err(e) => self.set_error(format!("Failed to launch game: {e}")),
+        }
+    }
+
+    fn launch_with_dev_session_id(&mut self) {
+        let session_id = self.dev_session_id.trim().to_string();
+        if session_id.len() != crate::crypto::SESSION_ID_LEN {
+            self.set_error(format!(
+                "Dev session ID must be {} characters.",
+                crate::crypto::SESSION_ID_LEN,
+            ));
+            return;
+        }
+        self.save_preferences();
+        self.launch_game_with_session(session_id);
+    }
+
+    fn poll_login_task(&mut self) {
+        let outcome = match self.login_task.as_mut() {
+            Some(task) => task.try_recv(),
+            None => return,
+        };
+        let Some(outcome) = outcome else {
+            return;
+        };
+        // Drop the task (kills the child if still running + joins reader thread).
+        self.login_task = None;
+        match outcome {
+            LoginOutcome::Success(session_id) => {
+                self.set_info("Login complete; launching game…");
+                self.launch_game_with_session(session_id);
+            }
+            LoginOutcome::Cancelled => {
+                self.set_info("Login window closed without completing.");
+            }
+            LoginOutcome::Error(msg) => {
+                self.set_error(format!("Login failed: {msg}"));
+            }
         }
     }
 
@@ -243,20 +313,37 @@ impl LauncherApp {
             if ui.button("Check for Updates").clicked() {
                 self.start_update();
             }
-            if ui.button("Launch").clicked() {
-                self.launch_game_now();
+            let login_in_flight = self.login_task.is_some();
+            let launch_button = egui::Button::new(if login_in_flight {
+                "Login in progress…"
+            } else {
+                "Launch"
+            });
+            if ui.add_enabled(!login_in_flight, launch_button).clicked() {
+                self.launch_via_login();
+            }
+            if login_in_flight && ui.button("Cancel Login").clicked() {
+                if let Some(task) = self.login_task.as_mut() {
+                    task.cancel();
+                }
+                self.login_task = None;
+                self.set_info("Login cancelled.");
             }
         });
 
         ui.add_space(8.0);
-        ui.collapsing("Developer: manual session id", |ui| {
-            ui.label(
-                "Paste a 56-character session ID here until the login webview is wired up.",
-            );
+        ui.collapsing("Developer: launch with a manual session id", |ui| {
+            ui.label(format!(
+                "Paste a {}-character session ID to bypass the webview login (useful for testing).",
+                crate::crypto::SESSION_ID_LEN
+            ));
             ui.add(
                 egui::TextEdit::singleline(&mut self.dev_session_id)
                     .desired_width(ui.available_width()),
             );
+            if ui.button("Launch with this session ID").clicked() {
+                self.launch_with_dev_session_id();
+            }
         });
 
         ui.separator();
@@ -286,6 +373,8 @@ impl LauncherApp {
 
 impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_login_task();
+
         let in_patcher = matches!(self.screen, Screen::Patcher(_));
         let mut dismiss_patcher = false;
 
@@ -301,6 +390,11 @@ impl eframe::App for LauncherApp {
                 self.render_main(ctx, ui);
             }
         });
+
+        // Keep polling while a login subprocess is in flight.
+        if self.login_task.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
 
         if dismiss_patcher {
             self.screen = Screen::Main;
