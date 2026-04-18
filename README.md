@@ -151,7 +151,7 @@ The launcher's server dropdown is fed by
 
 ```xml
 <Servers>
-    <Server Name="Localhost" Address="127.0.0.1" LoginUrl="" />
+    <Server Name="Localhost" Address="127.0.0.1" LoginUrl="http://127.0.0.1:54993/login" />
     <Server Name="Van Darnus Server"
             Address="vandarnus.seventhumbral.org"
             LoginUrl="https://vandarnus.seventhumbral.org/login.php" />
@@ -159,13 +159,13 @@ The launcher's server dropdown is fed by
 ```
 
 `Localhost` sorts first alphabetically and is the default pick on first
-run, matching the sibling `garlemald-server`'s localhost bind. Add more
-entries by editing the per-user `servers.xml` (placed next to
-`preferences.toml` in the platform config dir). An empty `LoginUrl`
-means the launcher skips its WebView-based login step and expects the
-user to paste a session token into the Dev Session field instead -
-handy when running against a Garlemald server that has no login web
-frontend.
+run, matching the sibling `garlemald-server`'s localhost bind (lobby on
+:54994, web/login on :54993). Add more entries by editing the per-user
+`servers.xml` (placed next to `preferences.toml` in the platform config
+dir). An empty `LoginUrl` means the launcher skips its WebView-based
+login step and expects the user to paste a session token into the
+Dev Session field instead - handy for smoke-testing against a running
+server without the web frontend up.
 
 ### User preferences
 
@@ -204,8 +204,8 @@ back to bundled defaults.
 
 ### First-time flow
 
-1. Start the sibling server (`../garlemald-server`) and create a
-   session row (see its README).
+1. Start the sibling server (`../garlemald-server`). `./scripts/run-all.sh`
+   brings up web (:54993) + lobby / world / map in one go.
 2. Launch the client:
    ```bash
    cargo run --release
@@ -219,11 +219,12 @@ back to bundled defaults.
 5. If the launcher reports the install is out of date, click
    **Download Patches**. The patcher will fetch every missing patch,
    CRC-verify it, and apply it via the ZiPatch decoder.
-6. Click **Login**. On a server that has a `LoginUrl`, the embedded
-   WebView opens and you authenticate there. On a server with empty
-   `LoginUrl` (the Localhost default), paste the 56-character session
-   id you inserted into `sessions` on the server side into the
-   **Dev Session** field.
+6. Click **Login**. The embedded WebView opens the server's
+   `LoginUrl` (the Localhost default is `http://127.0.0.1:54993/login`,
+   served by the sibling `web-server`). Sign in — or click "Create one"
+   for first-run signup — and the launcher receives the 56-character
+   session token automatically. For servers with an empty `LoginUrl`,
+   paste a session id into the **Dev Session** field instead.
 7. Click **Launch Game**. The launcher spawns `ffxivgame.exe` via the
    platform adapter (Wine on non-Windows), patches the lobby hostname
    into the PE at spawn time, and hands over the session id.
