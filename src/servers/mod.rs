@@ -1,3 +1,3 @@
 mod definitions;
 
-pub use definitions::{ServerDefinition, ServerDefinitions, DEFAULT_SERVERS_XML};
+pub use definitions::{ServerDefinition, ServerDefinitions, DEFAULT_SERVERS_TOML};

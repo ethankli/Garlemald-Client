@@ -3,12 +3,11 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use quick_xml::events::Event;
-use quick_xml::reader::Reader;
+use serde::Deserialize;
 
-pub const DEFAULT_SERVERS_XML: &str = include_str!("default_servers.xml");
+pub const DEFAULT_SERVERS_TOML: &str = include_str!("default_servers.toml");
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ServerDefinition {
     pub name: String,
     pub address: String,
@@ -20,6 +19,12 @@ pub struct ServerDefinitions {
     servers: BTreeMap<String, ServerDefinition>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct ServersFile {
+    #[serde(default, rename = "server")]
+    servers: Vec<ServerDefinition>,
+}
+
 impl ServerDefinitions {
     pub fn load_from_path(path: &Path) -> Result<Self> {
         let text = fs::read_to_string(path)
@@ -28,41 +33,17 @@ impl ServerDefinitions {
     }
 
     pub fn load_default() -> Result<Self> {
-        Self::parse(DEFAULT_SERVERS_XML)
+        Self::parse(DEFAULT_SERVERS_TOML)
     }
 
-    pub fn parse(xml: &str) -> Result<Self> {
-        let mut reader = Reader::from_str(xml);
-        reader.config_mut().trim_text(true);
+    pub fn parse(toml_text: &str) -> Result<Self> {
+        let parsed: ServersFile =
+            toml::from_str(toml_text).context("parsing servers TOML")?;
         let mut servers: BTreeMap<String, ServerDefinition> = BTreeMap::new();
-        let mut buf = Vec::new();
-        loop {
-            match reader.read_event_into(&mut buf)? {
-                Event::Eof => break,
-                Event::Start(e) | Event::Empty(e) if e.name().as_ref() == b"Server" => {
-                    let mut name = String::new();
-                    let mut address = String::new();
-                    let mut login_url = String::new();
-                    for attr in e.attributes() {
-                        let attr = attr?;
-                        let value = attr.unescape_value()?.into_owned();
-                        match attr.key.as_ref() {
-                            b"Name" => name = value,
-                            b"Address" => address = value,
-                            b"LoginUrl" => login_url = value,
-                            _ => {}
-                        }
-                    }
-                    if !name.is_empty() {
-                        servers.insert(
-                            name.clone(),
-                            ServerDefinition { name, address, login_url },
-                        );
-                    }
-                }
-                _ => {}
+        for server in parsed.servers {
+            if !server.name.is_empty() {
+                servers.insert(server.name.clone(), server);
             }
-            buf.clear();
         }
         Ok(Self { servers })
     }
@@ -91,26 +72,27 @@ mod tests {
     #[test]
     fn parses_default_servers() {
         let defs = ServerDefinitions::load_default().unwrap();
-        let van = defs.get("Van Darnus Server").expect("Van Darnus present");
-        assert_eq!(van.address, "vandarnus.seventhumbral.org");
-        assert_eq!(van.login_url, "https://vandarnus.seventhumbral.org/login.php");
-
-        // Localhost is the sibling garlemald-server's default bind; it
-        // should sort first alphabetically so new users pick it up on the
-        // empty-preferences code path.
         let local = defs.get("Localhost").expect("Localhost present");
         assert_eq!(local.address, "127.0.0.1");
+        assert_eq!(local.login_url, "http://127.0.0.1:54993/login");
         let first = defs.iter().next().expect("at least one server");
         assert_eq!(first.name, "Localhost");
     }
 
     #[test]
     fn parses_multiple_servers() {
-        let xml = r#"<Servers>
-            <Server Name="A" Address="a.example" LoginUrl="https://a/login" />
-            <Server Name="B" Address="b.example" LoginUrl="https://b/login" />
-        </Servers>"#;
-        let defs = ServerDefinitions::parse(xml).unwrap();
+        let toml_text = r#"
+[[server]]
+name = "A"
+address = "a.example"
+login_url = "https://a/login"
+
+[[server]]
+name = "B"
+address = "b.example"
+login_url = "https://b/login"
+"#;
+        let defs = ServerDefinitions::parse(toml_text).unwrap();
         assert_eq!(defs.len(), 2);
         assert_eq!(defs.get("A").unwrap().address, "a.example");
         assert_eq!(defs.get("B").unwrap().login_url, "https://b/login");
@@ -118,7 +100,7 @@ mod tests {
 
     #[test]
     fn empty_document_is_empty_set() {
-        let defs = ServerDefinitions::parse("<Servers></Servers>").unwrap();
+        let defs = ServerDefinitions::parse("").unwrap();
         assert!(defs.is_empty());
     }
 }

@@ -1,0 +1,4 @@
+[[server]]
+name = "Localhost"
+address = "127.0.0.1"
+login_url = "http://127.0.0.1:54993/login"

@@ -147,15 +147,14 @@ precedence (first hit wins):
 ### Server list
 
 The launcher's server dropdown is fed by
-`src/servers/default_servers.xml`, which ships two entries by default:
+`src/servers/default_servers.toml`, which ships a single loopback entry
+pointing at the sibling garlemald-server:
 
-```xml
-<Servers>
-    <Server Name="Localhost" Address="127.0.0.1" LoginUrl="http://127.0.0.1:54993/login" />
-    <Server Name="Van Darnus Server"
-            Address="vandarnus.seventhumbral.org"
-            LoginUrl="https://vandarnus.seventhumbral.org/login.php" />
-</Servers>
+```toml
+[[server]]
+name = "Localhost"
+address = "127.0.0.1"
+login_url = "http://127.0.0.1:54993/login"
 ```
 
 `Localhost` sorts first alphabetically and is the default pick on first
@@ -294,7 +293,7 @@ garlemald-client/
 |   |-- patch_format/       ZiPatch decoder
 |   |-- patcher/            download manager, manifest, verification, worker
 |   |-- platform/           per-OS install detection + launch (windows / macos / linux / wine)
-|   `-- servers/            default_servers.xml + parser
+|   `-- servers/            default_servers.toml + parser
 `-- target/                 build artefacts (gitignored)
 ```
 
