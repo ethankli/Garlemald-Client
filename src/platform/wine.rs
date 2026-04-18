@@ -14,10 +14,21 @@
 //! On Linux we rely on a system-installed `wine`; the `runtime/` directory is
 //! a no-op there.
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, Context, Result};
+
+use crate::config;
+
+/// `WINEDEBUG` channel selection for launching the game. The previous
+/// `fixme-all,err-all` value disabled *both* `fixme` and `err`, hiding
+/// exactly the output needed to diagnose loader failures and unhandled
+/// SEH exceptions. This enables `err` + `seh` (so crashes and exception
+/// info surface) while still muting the very noisy `fixme` channel.
+const WINEDEBUG_DEFAULT: &str = "-fixme,+err,+seh";
 
 /// Relative path inside the prefix to the FFXIV install root, matching the
 /// default the InstallShield installer uses.
@@ -42,7 +53,12 @@ impl WineRuntime {
 
     pub fn configure_command(&self, cmd: &mut Command) {
         cmd.env("WINEPREFIX", &self.prefix);
-        cmd.env("WINEDEBUG", "fixme-all,err-all");
+        // Honor an explicit WINEDEBUG from the caller's env — makes it easy
+        // to temporarily crank verbosity without recompiling (e.g.
+        // `WINEDEBUG=+relay,+seh cargo run`).
+        if std::env::var_os("WINEDEBUG").is_none() {
+            cmd.env("WINEDEBUG", WINEDEBUG_DEFAULT);
+        }
         #[cfg(target_os = "macos")]
         if !self.dyld_fallback_paths.is_empty() {
             let joined = std::env::join_paths(&self.dyld_fallback_paths)
@@ -87,17 +103,81 @@ pub fn launch_ffxiv_game(
     exe_path: &Path,
     encoded_argument: &str,
 ) -> Result<()> {
+    let log_path = wine_log_path()?;
+    let log_file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&log_path)
+        .with_context(|| format!("opening wine log {}", log_path.display()))?;
+    writeln!(
+        &log_file,
+        "=== garlemald-client launch ===\nwine: {}\nexe:  {}\narg:  {}\nprefix: {}\n",
+        runtime.wine_bin.display(),
+        exe_path.display(),
+        encoded_argument,
+        runtime.prefix.display(),
+    )
+    .ok();
+
+    let stderr_log = log_file
+        .try_clone()
+        .context("cloning wine log fd for stderr redirect")?;
+    let stdout_log = log_file
+        .try_clone()
+        .context("cloning wine log fd for stdout redirect")?;
+
     let mut cmd = Command::new(&runtime.wine_bin);
-    cmd.arg(exe_path).arg(encoded_argument);
+    cmd.arg(exe_path)
+        .arg(encoded_argument)
+        .stdout(Stdio::from(stdout_log))
+        .stderr(Stdio::from(stderr_log));
     if let Some(cwd) = exe_path.parent() {
         cmd.current_dir(cwd);
     }
     runtime.configure_command(&mut cmd);
+
+    log::info!("launching ffxivgame via wine; output → {}", log_path.display());
     let status = cmd.status().context("launching ffxivgame.exe via wine")?;
+
+    writeln!(&log_file, "\n=== exit: {status:?} ===").ok();
+
     if !status.success() {
-        return Err(anyhow!("ffxivgame.exe exited with status {status:?}"));
+        emit_log_tail(&log_path);
+        return Err(anyhow!(
+            "ffxivgame.exe exited with status {status:?}; see {} for wine output",
+            log_path.display(),
+        ));
     }
     Ok(())
+}
+
+/// Path where we write a fresh Wine stdout+stderr capture on every launch.
+/// Lives next to the prefix under `<data_dir>/logs/wine.log`.
+fn wine_log_path() -> Result<PathBuf> {
+    let dir = config::data_dir()?.join("logs");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating wine log dir {}", dir.display()))?;
+    Ok(dir.join("wine.log"))
+}
+
+/// Prints the tail of the wine log to our own logger so a failed launch
+/// leaves immediately-visible breadcrumbs without forcing the user to open
+/// the file themselves.
+fn emit_log_tail(log_path: &Path) {
+    const TAIL_BYTES: usize = 8 * 1024;
+    match std::fs::read(log_path) {
+        Ok(bytes) => {
+            let start = bytes.len().saturating_sub(TAIL_BYTES);
+            let tail = String::from_utf8_lossy(&bytes[start..]);
+            log::error!("--- tail of {} ---", log_path.display());
+            for line in tail.lines() {
+                log::error!("wine: {line}");
+            }
+            log::error!("--- end of wine log tail ---");
+        }
+        Err(e) => log::error!("could not read wine log {}: {e}", log_path.display()),
+    }
 }
 
 /// Copies `source_exe` to `dest_exe`, replacing `dest_exe` if it exists.

@@ -46,3 +46,12 @@ windows = { version = "0.58", features = [
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# objc2 0.4.1 has a debug-only `msg_send_check` that panics on macOS 26
+# because `NSFastEnumeration.countByEnumeratingWithState:` now returns
+# `NSUInteger` (`Q`) instead of `NSInteger` (`q`). Winit 0.29 hits it
+# during `NSScreen` enumeration at startup. Disable debug_assertions for
+# objc2 only so our own `debug_assert!`s remain active. Remove once we
+# upgrade to eframe 0.29+ (winit 0.30 / objc2 0.5).
+[profile.dev.package.objc2]
+debug-assertions = false

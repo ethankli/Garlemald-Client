@@ -64,7 +64,7 @@ pub fn apply_patches_on_disk(exe_path: &Path, patches: &[PePatch]) -> Result<()>
     let pe = PeFile32::parse(&*data)
         .with_context(|| format!("parsing PE headers of {}", exe_path.display()))?;
 
-    let mut plan: Vec<(u64, &[u8])> = Vec::with_capacity(patches.len());
+    let mut plan: Vec<(u64, &[u8], Vec<u8>)> = Vec::with_capacity(patches.len());
     for patch in patches {
         let file_offset = rva_to_file_offset(&pe, patch.rva).ok_or_else(|| {
             anyhow!(
@@ -73,19 +73,44 @@ pub fn apply_patches_on_disk(exe_path: &Path, patches: &[PePatch]) -> Result<()>
                 exe_path.display()
             )
         })?;
-        plan.push((file_offset, patch.bytes.as_slice()));
+        let before_end = (file_offset as usize).saturating_add(patch.bytes.len());
+        let before = if before_end <= data.len() {
+            data[file_offset as usize..before_end].to_vec()
+        } else {
+            Vec::new()
+        };
+        log::info!(
+            "PE patch: RVA 0x{:X} -> file offset 0x{:X} ({} bytes)\n    before: {}\n    after:  {}",
+            patch.rva,
+            file_offset,
+            patch.bytes.len(),
+            hex(&before),
+            hex(&patch.bytes),
+        );
+        plan.push((file_offset, patch.bytes.as_slice(), before));
     }
 
     let mut file = OpenOptions::new()
         .write(true)
         .open(exe_path)
         .with_context(|| format!("opening {} for writing", exe_path.display()))?;
-    for (offset, bytes) in plan {
+    for (offset, bytes, _) in plan {
         file.seek(SeekFrom::Start(offset))?;
         file.write_all(bytes)?;
     }
     file.flush()?;
     Ok(())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 3);
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 {
+            s.push(' ');
+        }
+        s.push_str(&format!("{b:02X}"));
+    }
+    s
 }
 
 fn rva_to_file_offset(pe: &PeFile32<'_>, rva: u32) -> Option<u64> {
