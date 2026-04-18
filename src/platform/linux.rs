@@ -2,7 +2,6 @@
 //! user-managed prefix under `$XDG_DATA_HOME/garlemald-client/prefix`.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 
@@ -12,8 +11,8 @@ use crate::launcher::{
     apply_patches_on_disk, encryption_time_patch, lobby_host_patch, GameLaunchRequest,
 };
 use crate::platform::wine::{
-    copy_exe_for_patching, ensure_prefix_initialized, launch_ffxiv_game, WineRuntime,
-    PREFIX_FFXIV_SUBPATH,
+    copy_exe_for_patching, ensure_prefix_initialized, launch_ffxiv_game, monotonic_ms_since_boot,
+    WineRuntime, PREFIX_FFXIV_SUBPATH,
 };
 use crate::platform::Platform;
 
@@ -56,7 +55,7 @@ impl Platform for LinuxPlatform {
         let runtime = Self::runtime_paths()?;
         ensure_prefix_initialized(&runtime)?;
 
-        let tick = current_tick_count_ms();
+        let tick = monotonic_ms_since_boot();
         let launch_args = crypto::build_launch_arguments(&request.session_id, tick)?;
 
         let src_exe = request.game_dir.join("ffxivgame.exe");
@@ -89,10 +88,3 @@ fn which_wine() -> Result<PathBuf> {
     Ok(PathBuf::from(text))
 }
 
-fn current_tick_count_ms() -> u32 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let dur = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO);
-    dur.as_millis() as u32
-}

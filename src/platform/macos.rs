@@ -17,7 +17,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 
@@ -27,7 +27,7 @@ use crate::launcher::{
     apply_patches_on_disk, encryption_time_patch, lobby_host_patch, GameLaunchRequest,
 };
 use crate::platform::wine::{
-    copy_exe_for_patching, ensure_prefix_initialized, launch_ffxiv_game, WineRuntime,
+    copy_exe_for_patching, ensure_prefix_initialized, launch_ffxiv_game, monotonic_ms_since_boot, WineRuntime,
     PREFIX_FFXIV_SUBPATH,
 };
 use crate::platform::Platform;
@@ -113,7 +113,11 @@ impl Platform for MacosPlatform {
         let runtime = Self::runtime_for_game_dir(&request.game_dir)?;
         ensure_prefix_initialized(&runtime)?;
 
-        let tick = current_tick_count_ms();
+        let tick = monotonic_ms_since_boot();
+        log::info!(
+            "launcher tick_count = 0x{tick:08x} ({tick}), blowfish key = \"{:08x}\"",
+            tick & !0xFFFF_u32
+        );
         let launch_args = crypto::build_launch_arguments(&request.session_id, tick)?;
 
         let src_exe = request.game_dir.join("ffxivgame.exe");
@@ -316,17 +320,6 @@ fn copy_dir_preserving_symlinks(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-/// 32-bit millisecond-resolution tick suitable for `crypto::build_launch_arguments`.
-/// The original uses Windows' `GetTickCount` (system uptime, wrapping u32);
-/// we use wall-clock ms because the game only cares that the key derivation
-/// and the plaintext embed the same value, not what the value actually is.
-fn current_tick_count_ms() -> u32 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u32)
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,10 +353,11 @@ mod tests {
     }
 
     #[test]
-    fn tick_count_is_deterministic_shape() {
-        // Just verify we don't panic and get a non-trivial value.
-        let t = current_tick_count_ms();
-        // tick wraps but is unlikely to be 0 in wall-clock terms.
-        let _ = t;
+    fn tick_count_is_plausible_uptime() {
+        // The monotonic clock returns ms since boot. On any reasonable CI /
+        // developer machine this is well above 1 second and nowhere near
+        // wrapping u32 (~49.7 days).
+        let t = monotonic_ms_since_boot();
+        assert!(t > 1_000, "expected non-trivial uptime, got {t}");
     }
 }

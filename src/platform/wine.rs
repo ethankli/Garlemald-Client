@@ -23,16 +23,42 @@ use anyhow::{anyhow, Context, Result};
 
 use crate::config;
 
-/// `WINEDEBUG` channel selection for launching the game. The previous
-/// `fixme-all,err-all` value disabled *both* `fixme` and `err`, hiding
-/// exactly the output needed to diagnose loader failures and unhandled
-/// SEH exceptions. This enables `err` + `seh` (so crashes and exception
-/// info surface) while still muting the very noisy `fixme` channel.
-const WINEDEBUG_DEFAULT: &str = "-fixme,+err,+seh";
+/// `WINEDEBUG` channel selection for launching the game.
+///
+/// Wine's debug syntax is `[class][+/-]channel`. Without a class prefix,
+/// `-fixme` / `+err` treat those as *channel* names (which don't exist),
+/// so the previous value was a no-op. Correct form:
+///   * `fixme-all` — silence fixme for every channel (was our prior intent)
+///   * `err+all`   — keep err enabled (already default, but explicit)
+///   * `+seh`      — all classes for the seh channel (exception dispatch)
+///   * `+module`   — PE loader (image mapping, imports, relocations)
+///   * `+loaddll`  — DLL load/unload events
+///   * `+process`  — CreateProcess / ExitProcess / initial PEB setup
+const WINEDEBUG_DEFAULT: &str =
+    "fixme-all,err+all,+seh,+module,+loaddll,+process";
 
 /// Relative path inside the prefix to the FFXIV install root, matching the
 /// default the InstallShield installer uses.
 pub const PREFIX_FFXIV_SUBPATH: &str = "drive_c/Program Files (x86)/SquareEnix/FINAL FANTASY XIV";
+
+/// Returns a 32-bit millisecond tick value compatible with what Wine's
+/// `GetTickCount()` will report to the game process.
+///
+/// Wine implements `GetTickCount` on top of `clock_gettime(CLOCK_MONOTONIC)`
+/// (ms since boot), NOT the wall-clock. The Blowfish key used in the
+/// command-line encryption is derived from the top 16 bits of this value, so
+/// the launcher's tick and the game's tick must come from the same clock for
+/// the keys to agree.
+pub fn monotonic_ms_since_boot() -> u32 {
+    let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    if rc != 0 {
+        return 0;
+    }
+    let ms = (ts.tv_sec as u64).wrapping_mul(1_000)
+        + (ts.tv_nsec as u64 / 1_000_000);
+    ms as u32
+}
 
 pub struct WineRuntime {
     #[allow(dead_code)]
