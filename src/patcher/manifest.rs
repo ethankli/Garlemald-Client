@@ -88,7 +88,6 @@ pub const PATCH_MANIFEST: &[PatchEntry] = &[
     PatchEntry { path: "48eca647/patch/D2012.09.19.0001.patch", size: 20_874_726,  crc32: 0x8A775526 },
 ];
 
-#[allow(dead_code)]
 pub fn total_bytes() -> u64 {
     PATCH_MANIFEST.iter().map(|e| e.size).sum()
 }

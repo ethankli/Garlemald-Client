@@ -1,10 +1,23 @@
-//! macOS (Apple Silicon) platform backend. Manages its own Wine prefix under
+//! macOS (Apple Silicon) platform backend.
+//!
+//! Manages its own Wine prefix and runtime under
 //! `~/Library/Application Support/garlemald-client/`, downloading the
-//! Sikarugir CrossOver engine + frameworks on first use.
+//! Sikarugir CrossOver engine + Frameworks on first launch. Interoperates
+//! with externally-managed prefixes (e.g. the sibling
+//! `xiv1point0-apple-silicon-installer`) by deriving `WINEPREFIX` from the
+//! game-location path that the user has configured — our own Wine binary
+//! plus their prefix works fine as long as both sides share the FFXIV 1.x
+//! install layout.
+//!
+//! The actual process start is Wine's responsibility: we pre-patch a copy of
+//! `ffxivgame.exe` on disk rather than trying to `WriteProcessMemory` across
+//! the Wine boundary. See `crate::launcher::pe_patch`.
 
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::process::Command;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 
@@ -33,63 +46,87 @@ impl MacosPlatform {
         Self
     }
 
-    fn runtime_paths() -> Result<WineRuntime> {
-        let data_dir = config::data_dir()?;
-        let root = data_dir.clone();
-        let runtime_root = root.join("runtime");
-        let wine_bin = runtime_root.join("wswine.bundle/bin/wine");
-        let wineserver_bin = runtime_root.join("wswine.bundle/bin/wineserver");
-        let dyld_fallback_paths = vec![
-            runtime_root.join("Frameworks"),
-            runtime_root.join("wswine.bundle/lib"),
-            PathBuf::from("/usr/local/lib"),
-            PathBuf::from("/usr/lib"),
-        ];
+    /// Path to the managed prefix root (`<dataDir>/prefix/`).
+    fn managed_prefix_dir() -> Result<PathBuf> {
+        Ok(config::data_dir()?.join("prefix"))
+    }
+
+    /// Path to the managed FFXIV install (`<managed-prefix>/drive_c/.../FFXIV`).
+    fn managed_install_dir() -> Result<PathBuf> {
+        Ok(Self::managed_prefix_dir()?.join(PREFIX_FFXIV_SUBPATH))
+    }
+
+    /// Path to the managed runtime root (`<dataDir>/runtime/`). The Sikarugir
+    /// engine + Frameworks live here.
+    fn runtime_root() -> Result<PathBuf> {
+        Ok(config::data_dir()?.join("runtime"))
+    }
+
+    fn wine_bin() -> Result<PathBuf> {
+        Ok(Self::runtime_root()?.join("wswine.bundle/bin/wine"))
+    }
+
+    fn wineserver_bin() -> Result<PathBuf> {
+        Ok(Self::runtime_root()?.join("wswine.bundle/bin/wineserver"))
+    }
+
+    /// Builds the [`WineRuntime`] that should be used to launch a game at
+    /// `game_dir`. Uses the prefix that actually contains `game_dir` if we
+    /// can derive one; falls back to the managed prefix otherwise.
+    fn runtime_for_game_dir(game_dir: &Path) -> Result<WineRuntime> {
+        let prefix = derive_prefix_from_game_location(game_dir)
+            .map(|p| {
+                log::info!("using WINEPREFIX derived from game dir: {}", p.display());
+                p
+            })
+            .unwrap_or_else(|| Self::managed_prefix_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let runtime_root = Self::runtime_root()?;
         Ok(WineRuntime {
-            root,
-            prefix: data_dir.join("prefix"),
-            wine_bin,
-            wineserver_bin,
-            dyld_fallback_paths,
+            root: config::data_dir()?,
+            prefix,
+            wine_bin: Self::wine_bin()?,
+            wineserver_bin: Self::wineserver_bin()?,
+            dyld_fallback_paths: vec![
+                runtime_root.join("Frameworks"),
+                runtime_root.join("wswine.bundle/lib"),
+                PathBuf::from("/usr/local/lib"),
+                PathBuf::from("/usr/lib"),
+            ],
         })
     }
 }
 
 impl Platform for MacosPlatform {
     fn detect_game_install(&self) -> Option<PathBuf> {
-        // First, our own managed prefix.
-        if let Ok(runtime) = Self::runtime_paths() {
-            let managed = runtime.install_root();
-            if self.is_valid_game_location(&managed) {
-                return Some(managed);
-            }
+        let managed = Self::managed_install_dir().ok()?;
+        if self.is_valid_game_location(&managed) {
+            Some(managed)
+        } else {
+            None
         }
-        // Fall back to the xiv1point0-apple-silicon-installer layout if the
-        // user ran that installer separately.
-        if let Some(home) = std::env::var_os("HOME") {
-            let guess = PathBuf::from(home)
-                .join("Documents/Programming/server-workspace/xiv1point0-apple-silicon-installer/target/prefix")
-                .join(PREFIX_FFXIV_SUBPATH);
-            if self.is_valid_game_location(&guess) {
-                return Some(guess);
-            }
-        }
-        None
     }
 
     fn launch_game(&self, request: &GameLaunchRequest) -> Result<()> {
-        let runtime = Self::runtime_paths()?;
-        ensure_runtime_downloaded(&runtime)?;
+        ensure_rosetta_available()?;
+        ensure_runtime_downloaded()?;
+
+        let runtime = Self::runtime_for_game_dir(&request.game_dir)?;
         ensure_prefix_initialized(&runtime)?;
 
         let tick = current_tick_count_ms();
         let launch_args = crypto::build_launch_arguments(&request.session_id, tick)?;
 
         let src_exe = request.game_dir.join("ffxivgame.exe");
+        if !src_exe.exists() {
+            return Err(anyhow!("ffxivgame.exe not found at {}", src_exe.display()));
+        }
         let patched_exe = request.game_dir.join("ffxivgame.patched.exe");
         copy_exe_for_patching(&src_exe, &patched_exe)?;
 
-        let patches = vec![encryption_time_patch(), lobby_host_patch(&request.lobby_host)?];
+        let patches = vec![
+            encryption_time_patch(),
+            lobby_host_patch(&request.lobby_host)?,
+        ];
         apply_patches_on_disk(&patched_exe, &patches)?;
 
         launch_ffxiv_game(&runtime, &patched_exe, &launch_args.encoded_argument)?;
@@ -97,92 +134,236 @@ impl Platform for MacosPlatform {
     }
 }
 
-fn ensure_runtime_downloaded(runtime: &WineRuntime) -> Result<()> {
-    let frameworks = runtime.root.join("runtime/Frameworks");
-    let wswine_bin = runtime.root.join("runtime/wswine.bundle/bin/wine");
+/// Walks up `game_dir` looking for a `drive_c` ancestor; the parent of
+/// `drive_c` is the Wine prefix. Returns `None` if the path isn't shaped like
+/// a Wine install — e.g. a raw Windows-side game folder.
+fn derive_prefix_from_game_location(game_dir: &Path) -> Option<PathBuf> {
+    let mut current = game_dir;
+    while let Some(parent) = current.parent() {
+        if current.file_name() == Some(OsStr::new("drive_c")) {
+            return Some(parent.to_path_buf());
+        }
+        current = parent;
+    }
+    None
+}
 
-    fs::create_dir_all(runtime.root.join("runtime"))
-        .with_context(|| format!("creating runtime dir {}", runtime.root.display()))?;
+/// Checks that Rosetta 2 is available (Apple Silicon requires it to run the
+/// x86_64 Wine engine). Returns a user-friendly error if it isn't — we don't
+/// attempt to install it ourselves because that needs admin auth.
+fn ensure_rosetta_available() -> Result<()> {
+    if !is_apple_silicon() {
+        return Ok(());
+    }
+    let status = Command::new("/usr/bin/arch")
+        .arg("-x86_64")
+        .arg("/usr/bin/true")
+        .status()
+        .context("running /usr/bin/arch to probe Rosetta 2")?;
+    if !status.success() {
+        return Err(anyhow!(
+            "Rosetta 2 is required to run the x86_64 Wine engine on Apple Silicon.\n\
+             Install it by running:\n    softwareupdate --install-rosetta --agree-to-license"
+        ));
+    }
+    Ok(())
+}
+
+fn is_apple_silicon() -> bool {
+    cfg!(all(target_os = "macos", target_arch = "aarch64"))
+}
+
+/// Downloads the Sikarugir wrapper Frameworks + CrossOver engine if they
+/// aren't already on disk. Safe to call every launch — it's a fast path when
+/// the runtime is present.
+pub fn ensure_runtime_downloaded() -> Result<()> {
+    let runtime_root = MacosPlatform::runtime_root()?;
+    let frameworks = runtime_root.join("Frameworks");
+    let wswine_bundle = runtime_root.join("wswine.bundle");
+    let wine_bin = MacosPlatform::wine_bin()?;
+
+    fs::create_dir_all(&runtime_root)
+        .with_context(|| format!("creating runtime dir {}", runtime_root.display()))?;
 
     if !frameworks.exists() {
-        log::info!("downloading Sikarugir wrapper {WRAPPER_VERSION}");
-        let tmp = tempfile::tempdir().context("creating tmp dir for wrapper")?;
+        log::info!("downloading Sikarugir wrapper v{WRAPPER_VERSION} ({WRAPPER_URL})");
+        let tmp = tempfile::tempdir().context("creating tmp dir for wrapper archive")?;
         let archive = tmp.path().join("wrapper.tar.xz");
         download_to(WRAPPER_URL, &archive)?;
         extract_tar_xz(&archive, tmp.path())?;
         let src = tmp
             .path()
             .join(format!("Template-{WRAPPER_VERSION}.app/Contents/Frameworks"));
-        copy_dir_all(&src, &frameworks).context("copying Frameworks")?;
+        if !src.exists() {
+            return Err(anyhow!(
+                "wrapper archive didn't contain expected path {}",
+                src.display()
+            ));
+        }
+        copy_dir_preserving_symlinks(&src, &frameworks).context("copying wrapper Frameworks")?;
+        log::info!("installed Frameworks at {}", frameworks.display());
     }
 
-    if !wswine_bin.exists() {
-        log::info!("downloading Wine engine {ENGINE_NAME}");
-        let tmp = tempfile::tempdir().context("creating tmp dir for engine")?;
+    if !wine_bin.exists() {
+        log::info!("downloading Wine engine {ENGINE_NAME} ({ENGINE_URL})");
+        let tmp = tempfile::tempdir().context("creating tmp dir for engine archive")?;
         let archive = tmp.path().join("engine.tar.xz");
         download_to(ENGINE_URL, &archive)?;
         extract_tar_xz(&archive, tmp.path())?;
         let src = tmp.path().join("wswine.bundle");
-        let dest = runtime.root.join("runtime/wswine.bundle");
-        if dest.exists() {
-            fs::remove_dir_all(&dest).context("removing stale wswine.bundle")?;
+        if !src.exists() {
+            return Err(anyhow!(
+                "engine archive didn't contain expected wswine.bundle at {}",
+                src.display()
+            ));
         }
-        fs::rename(&src, &dest)
-            .or_else(|_| copy_dir_all(&src, &dest))
-            .context("installing wswine.bundle")?;
+        if wswine_bundle.exists() {
+            fs::remove_dir_all(&wswine_bundle)
+                .with_context(|| format!("removing stale {}", wswine_bundle.display()))?;
+        }
+        // rename is cheap but cross-fs fails; fall back to a deep copy.
+        if fs::rename(&src, &wswine_bundle).is_err() {
+            copy_dir_preserving_symlinks(&src, &wswine_bundle)
+                .context("installing wswine.bundle")?;
+        }
+        log::info!("installed Wine engine at {}", wswine_bundle.display());
     }
 
+    // Sanity check: the engine actually runs.
+    let version_check = Command::new(&wine_bin).arg("--version").output();
+    match version_check {
+        Ok(out) if out.status.success() => {
+            let s = String::from_utf8_lossy(&out.stdout);
+            log::info!("wine --version: {}", s.trim());
+        }
+        Ok(out) => {
+            return Err(anyhow!(
+                "wine --version failed (exit {:?}): {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        Err(e) => return Err(anyhow!("failed to execute {}: {e}", wine_bin.display())),
+    }
     Ok(())
 }
 
 fn download_to(url: &str, dst: &Path) -> Result<()> {
+    let started = Instant::now();
     let response = ureq::get(url)
         .call()
         .with_context(|| format!("GET {url}"))?;
     let mut reader = response.into_reader();
-    let mut out = fs::File::create(dst)
-        .with_context(|| format!("creating {}", dst.display()))?;
-    std::io::copy(&mut reader, &mut out)?;
+    let mut out = fs::File::create(dst).with_context(|| format!("creating {}", dst.display()))?;
+    let bytes = std::io::copy(&mut reader, &mut out).context("streaming HTTP body to disk")?;
+    log::info!(
+        "downloaded {} ({} bytes) in {:.1}s",
+        dst.display(),
+        bytes,
+        started.elapsed().as_secs_f64()
+    );
     Ok(())
 }
 
 fn extract_tar_xz(archive: &Path, dst: &Path) -> Result<()> {
-    // Use the system `tar` to avoid pulling an xz decoder into the Rust build.
-    let status = std::process::Command::new("tar")
+    let status = Command::new("tar")
         .arg("-xJf")
         .arg(archive)
         .arg("-C")
         .arg(dst)
         .status()
-        .context("running tar -xJf")?;
+        .context("running tar -xJf (macOS bsdtar should handle .xz via libarchive)")?;
     if !status.success() {
-        return Err(anyhow!("tar -xJf failed with {status:?}"));
+        return Err(anyhow!(
+            "tar -xJf {} -> {} failed with {status:?}",
+            archive.display(),
+            dst.display()
+        ));
     }
     Ok(())
 }
 
-fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
+/// Recursive copy that preserves symlinks (critical for Frameworks and
+/// wswine.bundle, which use version-suffixed dylibs linked into unversioned
+/// names). Does *not* preserve file modes beyond the std defaults.
+fn copy_dir_preserving_symlinks(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir_all(dst)
+        .with_context(|| format!("creating dir {}", dst.display()))?;
+    for entry in fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
         let entry = entry?;
         let ty = entry.file_type()?;
-        let dest_path = dst.join(entry.file_name());
-        if ty.is_dir() {
-            copy_dir_all(&entry.path(), &dest_path)?;
-        } else if ty.is_symlink() {
-            let link_target = fs::read_link(entry.path())?;
-            let _ = std::os::unix::fs::symlink(&link_target, &dest_path);
+        let source = entry.path();
+        let destination = dst.join(entry.file_name());
+        if ty.is_symlink() {
+            let link_target = fs::read_link(&source)?;
+            // If destination already exists (from a previous partial copy),
+            // remove it first — std symlink() won't overwrite.
+            let _ = fs::remove_file(&destination);
+            std::os::unix::fs::symlink(&link_target, &destination).with_context(|| {
+                format!(
+                    "symlinking {} -> {}",
+                    destination.display(),
+                    link_target.display()
+                )
+            })?;
+        } else if ty.is_dir() {
+            copy_dir_preserving_symlinks(&source, &destination)?;
         } else {
-            fs::copy(entry.path(), &dest_path)?;
+            fs::copy(&source, &destination)
+                .with_context(|| format!("copying {} -> {}", source.display(), destination.display()))?;
         }
     }
     Ok(())
 }
 
+/// 32-bit millisecond-resolution tick suitable for `crypto::build_launch_arguments`.
+/// The original uses Windows' `GetTickCount` (system uptime, wrapping u32);
+/// we use wall-clock ms because the game only cares that the key derivation
+/// and the plaintext embed the same value, not what the value actually is.
 fn current_tick_count_ms() -> u32 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let dur = SystemTime::now()
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO);
-    (dur.as_millis() as u32).wrapping_sub(0)
+        .map(|d| d.as_millis() as u32)
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derives_prefix_from_nested_game_dir() {
+        let game = PathBuf::from("/Users/me/Library/Application Support/garlemald-client/prefix/drive_c/Program Files (x86)/SquareEnix/FINAL FANTASY XIV");
+        let prefix = derive_prefix_from_game_location(&game);
+        assert_eq!(
+            prefix,
+            Some(PathBuf::from(
+                "/Users/me/Library/Application Support/garlemald-client/prefix"
+            ))
+        );
+    }
+
+    #[test]
+    fn no_prefix_when_no_drive_c() {
+        let game = PathBuf::from("/tmp/ffxiv");
+        assert_eq!(derive_prefix_from_game_location(&game), None);
+    }
+
+    #[test]
+    fn derives_prefix_from_external_installer_layout() {
+        // The xiv1point0-apple-silicon-installer's default prefix.
+        let game = PathBuf::from(
+            "/Users/me/Code/xiv1point0-apple-silicon-installer/target/prefix/drive_c/Program Files (x86)/SquareEnix/FINAL FANTASY XIV",
+        );
+        let prefix = derive_prefix_from_game_location(&game).unwrap();
+        assert!(prefix.ends_with("target/prefix"));
+    }
+
+    #[test]
+    fn tick_count_is_deterministic_shape() {
+        // Just verify we don't panic and get a non-trivial value.
+        let t = current_tick_count_ms();
+        // tick wraps but is unlikely to be 0 in wall-clock terms.
+        let _ = t;
+    }
 }

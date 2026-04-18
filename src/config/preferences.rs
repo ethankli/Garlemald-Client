@@ -20,6 +20,8 @@ pub struct LauncherPreferences {
     pub game_location: Option<PathBuf>,
     #[serde(default)]
     pub wine_runtime_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub patch_download_dir: Option<PathBuf>,
 }
 
 impl Preferences {

@@ -35,6 +35,7 @@ pub struct WineRuntime {
 }
 
 impl WineRuntime {
+    #[allow(dead_code)] // used by the Linux backend; macOS derives paths differently.
     pub fn install_root(&self) -> PathBuf {
         self.prefix.join(PREFIX_FFXIV_SUBPATH)
     }

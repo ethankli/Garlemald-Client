@@ -10,9 +10,10 @@ use crate::config::{data_dir, preferences_file_path, Preferences};
 use crate::launcher::GameLaunchRequest;
 use crate::login::{LoginOutcome, LoginTask};
 use crate::patcher::check_game_version;
+use crate::patcher::manifest::total_bytes;
 use crate::platform::{current as current_platform, Platform};
 use crate::servers::ServerDefinitions;
-use crate::version::{APP_NAME, APP_VERSION};
+use crate::version::{APP_NAME, APP_VERSION, FFXIV_GAME_VERSION};
 
 pub fn run() -> Result<()> {
     log::info!("{APP_NAME} {APP_VERSION} starting");
@@ -56,7 +57,13 @@ struct LauncherApp {
     screen: Screen,
     settings_modal: Option<SettingsModal>,
     login_task: Option<LoginTask>,
+    outdated_prompt_open: bool,
+    download_confirm: Option<DownloadConfirmState>,
     last_message: Option<(MessageKind, String)>,
+}
+
+struct DownloadConfirmState {
+    download_dir: PathBuf,
 }
 
 impl LauncherApp {
@@ -75,7 +82,7 @@ impl LauncherApp {
 
         let manual_server_address = prefs.launcher.server_address.clone();
 
-        Self {
+        let mut app = Self {
             prefs,
             prefs_path,
             servers,
@@ -86,8 +93,37 @@ impl LauncherApp {
             screen: Screen::Main,
             settings_modal: None,
             login_task: None,
+            outdated_prompt_open: false,
+            download_confirm: None,
             last_message: None,
+        };
+        app.outdated_prompt_open = app.game_is_installed_but_outdated();
+        app
+    }
+
+    /// Returns true when a valid install is present on disk but `game.ver`
+    /// reports a version other than [`FFXIV_GAME_VERSION`]. Used to
+    /// auto-surface the update prompt on startup.
+    fn game_is_installed_but_outdated(&self) -> bool {
+        let Some(path) = self.resolved_game_location() else {
+            return false;
+        };
+        if !current_platform().is_valid_game_location(&path) {
+            return false;
         }
+        !check_game_version(&path)
+    }
+
+    fn default_download_dir(&self) -> PathBuf {
+        self.prefs
+            .launcher
+            .patch_download_dir
+            .clone()
+            .unwrap_or_else(|| {
+                data_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join("ffxiv_patches")
+            })
     }
 
     fn resolved_login_url(&self) -> Option<String> {
@@ -134,6 +170,8 @@ impl LauncherApp {
         self.last_message = Some((MessageKind::Error, msg.into()));
     }
 
+    /// Opens the download-confirmation modal; the actual patcher doesn't
+    /// start until the user clicks "Continue" in that modal.
     fn start_update(&mut self) {
         let Some(game_dir) = self.resolved_game_location() else {
             self.set_error("No game location set. Use Game Settings to pick one.");
@@ -147,13 +185,17 @@ impl LauncherApp {
             ));
             return;
         }
-        let download_dir = match data_dir() {
-            Ok(d) => d.join("ffxiv_patches"),
-            Err(e) => {
-                self.set_error(format!("Could not resolve download dir: {e}"));
-                return;
-            }
+        self.download_confirm = Some(DownloadConfirmState {
+            download_dir: self.default_download_dir(),
+        });
+    }
+
+    fn kick_off_patcher(&mut self, download_dir: PathBuf) {
+        let Some(game_dir) = self.resolved_game_location() else {
+            self.set_error("No game location set.");
+            return;
         };
+        self.prefs.launcher.patch_download_dir = Some(download_dir.clone());
         self.save_preferences();
         self.screen = Screen::Patcher(PatcherScreen::start(game_dir, download_dir));
     }
@@ -367,6 +409,99 @@ impl LauncherApp {
                     self.settings_modal = None;
                 }
             }
+        }
+
+        self.render_outdated_prompt(ctx);
+        self.render_download_confirm(ctx);
+    }
+
+    fn render_outdated_prompt(&mut self, ctx: &egui::Context) {
+        if !self.outdated_prompt_open {
+            return;
+        }
+        let mut window_open = true;
+        let mut dismiss = false;
+        let mut accept = false;
+        egui::Window::new("Outdated Game Installation")
+            .collapsible(false)
+            .resizable(false)
+            .movable(true)
+            .open(&mut window_open)
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "Your game install appears to be out of date.\nWould you like to update it to version {FFXIV_GAME_VERSION}?"
+                ));
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Update").clicked() {
+                        accept = true;
+                    }
+                    if ui.button("Not now").clicked() {
+                        dismiss = true;
+                    }
+                });
+            });
+        if !window_open || dismiss {
+            self.outdated_prompt_open = false;
+        }
+        if accept {
+            self.outdated_prompt_open = false;
+            self.start_update();
+        }
+    }
+
+    fn render_download_confirm(&mut self, ctx: &egui::Context) {
+        let Some(state) = self.download_confirm.as_mut() else {
+            return;
+        };
+        let mut window_open = true;
+        let mut proceed = false;
+        let mut choose_dir = false;
+        let mut cancel = false;
+        let gigabytes = total_bytes() as f64 / 1_000_000_000.0;
+        egui::Window::new("Patch Download Location")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut window_open)
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "The launcher needs to download approximately {gigabytes:.2} GB of data\n\
+                     to update the game. Files will be stored at:"
+                ));
+                ui.monospace(state.download_dir.display().to_string());
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Continue").clicked() {
+                        proceed = true;
+                    }
+                    if ui.button("Choose different location…").clicked() {
+                        choose_dir = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if choose_dir {
+            if let Some(folder) = rfd::FileDialog::new()
+                .set_title("Specify patch download location")
+                .pick_folder()
+            {
+                state.download_dir = folder;
+            }
+            return;
+        }
+
+        if !window_open || cancel {
+            self.download_confirm = None;
+            return;
+        }
+
+        if proceed {
+            let dir = state.download_dir.clone();
+            self.download_confirm = None;
+            self.kick_off_patcher(dir);
         }
     }
 }
