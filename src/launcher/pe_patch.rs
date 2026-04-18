@@ -1,0 +1,127 @@
+//! Resolve RVA → file-offset in a Win32 PE image so we can patch
+//! `ffxivgame.exe` on disk before running it under Wine. This replaces the
+//! Windows-only WriteProcessMemory flow for non-Windows platforms.
+//!
+//! The two patches are the same as Launcher.cpp: a 5-byte encryption-time
+//! immediate-load patch at RVA 0x9A15E3, and a NUL-terminated host-name
+//! string (max 0x14 bytes) written into the slot at RVA 0xB90110.
+
+use std::fs::OpenOptions;
+use std::io::{Seek, SeekFrom, Write};
+use std::path::Path;
+
+use anyhow::{anyhow, Context, Result};
+use object::read::pe::PeFile32;
+use object::{Object, ObjectSection};
+
+pub const ENCRYPTION_TIME_PATCH_RVA: u32 = 0x9A15E3;
+pub const LOBBY_HOST_NAME_RVA: u32 = 0xB90110;
+pub const LOBBY_HOST_NAME_SLOT_SIZE: usize = 0x14;
+
+/// Canonical encryption-time immediate-load instruction (replaces the call
+/// to GetTickCount with a constant `mov eax, 0x50E0E812`).
+pub const ENCRYPTION_TIME_PATCH_BYTES: [u8; 5] = [0xB8, 0x12, 0xE8, 0xE0, 0x50];
+
+#[derive(Debug, Clone)]
+pub struct PePatch {
+    pub rva: u32,
+    pub bytes: Vec<u8>,
+}
+
+pub fn encryption_time_patch() -> PePatch {
+    PePatch {
+        rva: ENCRYPTION_TIME_PATCH_RVA,
+        bytes: ENCRYPTION_TIME_PATCH_BYTES.to_vec(),
+    }
+}
+
+/// Builds the lobby-host patch. The slot is a fixed-size NUL-terminated
+/// buffer of 0x14 bytes; longer hostnames are rejected.
+pub fn lobby_host_patch(host: &str) -> Result<PePatch> {
+    let bytes = host.as_bytes();
+    if bytes.len() + 1 > LOBBY_HOST_NAME_SLOT_SIZE {
+        return Err(anyhow!(
+            "lobby host name too long: {} bytes (limit {} including NUL)",
+            bytes.len(),
+            LOBBY_HOST_NAME_SLOT_SIZE
+        ));
+    }
+    let mut buf = Vec::with_capacity(bytes.len() + 1);
+    buf.extend_from_slice(bytes);
+    buf.push(0);
+    Ok(PePatch {
+        rva: LOBBY_HOST_NAME_RVA,
+        bytes: buf,
+    })
+}
+
+/// Writes each patch's bytes into `exe_path` at the file offset corresponding
+/// to its RVA. This is a destructive edit of the file — callers should pass
+/// a working copy of `ffxivgame.exe`, not the original.
+pub fn apply_patches_on_disk(exe_path: &Path, patches: &[PePatch]) -> Result<()> {
+    let data = std::fs::read(exe_path)
+        .with_context(|| format!("reading {}", exe_path.display()))?;
+    let pe = PeFile32::parse(&*data)
+        .with_context(|| format!("parsing PE headers of {}", exe_path.display()))?;
+
+    let mut plan: Vec<(u64, &[u8])> = Vec::with_capacity(patches.len());
+    for patch in patches {
+        let file_offset = rva_to_file_offset(&pe, patch.rva).ok_or_else(|| {
+            anyhow!(
+                "RVA 0x{:X} is not mapped to any PE section of {}",
+                patch.rva,
+                exe_path.display()
+            )
+        })?;
+        plan.push((file_offset, patch.bytes.as_slice()));
+    }
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .open(exe_path)
+        .with_context(|| format!("opening {} for writing", exe_path.display()))?;
+    for (offset, bytes) in plan {
+        file.seek(SeekFrom::Start(offset))?;
+        file.write_all(bytes)?;
+    }
+    file.flush()?;
+    Ok(())
+}
+
+fn rva_to_file_offset(pe: &PeFile32<'_>, rva: u32) -> Option<u64> {
+    for section in pe.sections() {
+        let va = section.address() as u32;
+        let vsize = section.size() as u32;
+        if rva >= va && rva < va.saturating_add(vsize) {
+            let (file_offset, _) = section.file_range()?;
+            return Some(file_offset + (rva - va) as u64);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_patch_appends_nul() {
+        let p = lobby_host_patch("test.example").unwrap();
+        assert_eq!(p.rva, LOBBY_HOST_NAME_RVA);
+        assert_eq!(*p.bytes.last().unwrap(), 0);
+        assert_eq!(&p.bytes[..p.bytes.len() - 1], b"test.example");
+    }
+
+    #[test]
+    fn host_patch_rejects_oversize_input() {
+        let too_long = "x".repeat(LOBBY_HOST_NAME_SLOT_SIZE);
+        assert!(lobby_host_patch(&too_long).is_err());
+    }
+
+    #[test]
+    fn encryption_patch_is_five_bytes() {
+        let p = encryption_time_patch();
+        assert_eq!(p.bytes.len(), 5);
+        assert_eq!(p.rva, ENCRYPTION_TIME_PATCH_RVA);
+    }
+}
