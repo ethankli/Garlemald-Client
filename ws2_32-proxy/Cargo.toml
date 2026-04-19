@@ -1,0 +1,48 @@
+[package]
+name = "ws2_32-proxy"
+version = "0.1.0"
+edition = "2021"
+description = "DLL-hijack proxy for ws2_32.dll — logs send/recv/connect/closesocket payloads to disk and forwards every other export to the real Windows winsock. Drop next to ffxivgame.patched.exe and set WinSock tracing in Developer Settings."
+
+# Standalone crate — intentionally not part of the garlemald-client workspace
+# because we need a 32-bit Windows cdylib (Rust target `i686-pc-windows-gnu`)
+# with a completely different linker (`i686-w64-mingw32-gcc`) than the macOS
+# launcher. Keeping it decoupled avoids entangling the client's toolchain
+# with the MinGW cross-compile.
+
+[lib]
+crate-type = ["cdylib"]
+# The produced DLL must be named `ws2_32.dll` on disk so the Windows
+# loader prefers it over `C:\windows\system32\ws2_32.dll` when it lives
+# in the exe's directory. Cargo writes the output name from this field.
+name = "ws2_32"
+
+[dependencies]
+# The `windows-sys` crate gives us raw Win32 bindings (FFI types, handle
+# shapes, LoadLibraryA signatures) without dragging in the heavier
+# `windows` safe-wrapper layer. Lower surface area = faster cross-compile
+# and fewer transitive deps to audit for MinGW compatibility.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinSock",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
+
+[profile.release]
+# Ship a small, stripped DLL. The proxy is on every socket call on the
+# hot path; LTO lets the thin forwarding wrappers get inlined against
+# the logged-function boundary.
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.dev]
+# Dev builds still abort on panic — a panic inside a socket hook would
+# otherwise unwind into the client's stack and crash the game with no
+# useful diagnostic. Abort at least gives a clean Wine/Windows crash
+# dump pointing at our DLL.
+panic = "abort"

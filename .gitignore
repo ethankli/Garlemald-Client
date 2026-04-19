@@ -1,5 +1,18 @@
-/target
+# Cargo build output. Unanchored so the pattern catches both the
+# client crate's `target/` at the repo root and the sibling
+# `ws2_32-proxy/target/` produced by the Windows cross-compile
+# (`cargo build --target i686-pc-windows-gnu`). Committing the DLL
+# artifacts would bloat the repo and stale quickly; future
+# contributors rebuild locally following README instructions.
+target/
+
+# Editor backup files Rust tooling sometimes leaves behind.
 **/*.rs.bk
 Cargo.lock.bak
 .DS_Store
 /.cargo
+
+# Stray intermediate `.def` files from in-place ordinal edits.
+# `ws2_32-proxy/ws2_32.def` itself is tracked.
+**/*.def.new
+**/*.def.bak

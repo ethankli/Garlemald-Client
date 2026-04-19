@@ -37,6 +37,15 @@ pub struct DeveloperPreferences {
     /// `<data_dir>/logs/wine.log`; this flag just raises the ceiling.
     #[serde(default)]
     pub enable_verbose_wine_debug: bool,
+    /// When true, deploys our `ws2_32.dll` hijack proxy into the game
+    /// folder before launch. The proxy tees every `send`/`recv` /
+    /// `WSASend`/`WSARecv`/`connect`/`closesocket` call the 1.23b client
+    /// makes to `<game_dir>/ws2_32-trace.log`. Everything else forwards
+    /// transparently to a renamed copy of the real DLL
+    /// (`<game_dir>/ws2_32_real.dll`). Off: the proxy + the copy are
+    /// removed on launch so the stock loader path is restored.
+    #[serde(default)]
+    pub enable_winsock_tracing: bool,
 }
 
 impl Preferences {

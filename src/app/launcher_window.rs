@@ -309,6 +309,7 @@ impl LauncherApp {
             lobby_host: server_address.clone(),
             session_id,
             wine_debug_override,
+            enable_winsock_proxy: self.prefs.developer.enable_winsock_tracing,
         };
         match crate::launcher::launch_game(&request) {
             Ok(()) => self.set_info(format!(

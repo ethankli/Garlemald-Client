@@ -146,7 +146,29 @@ pub fn launch_ffxiv_game(
     exe_path: &Path,
     encoded_argument: &str,
     wine_debug_override: Option<&str>,
+    enable_winsock_proxy: bool,
 ) -> Result<()> {
+    // Resolve / tear down the ws2_32 DLL-hijack proxy before we fork
+    // the game process. The proxy logs every `send`/`recv`/etc. call to
+    // `<game_dir>/ws2_32-trace.log`; when the toggle is off we actively
+    // remove both our proxy and the renamed system-DLL copy so the PE
+    // loader goes back to Wine's built-in ws2_32 on the next launch.
+    if let Some(game_dir) = exe_path.parent() {
+        apply_winsock_proxy(runtime, game_dir, enable_winsock_proxy)
+            .unwrap_or_else(|e| log::warn!("winsock proxy deploy skipped: {e:#}"));
+    }
+    // Wine classifies `ws2_32.dll` as a builtin and loads it from its
+    // own WINEDLLPATH bundle regardless of what sits next to the exe.
+    // `WINEDLLOVERRIDES=ws2_32=n,b` tells the loader to try the native
+    // (file-based) copy first, then fall back to the builtin on miss.
+    // The comma separates the preferred order; `n` alone would reject
+    // the builtin entirely and break the unhooked fallback when the
+    // proxy isn't deployed, so we pair it with `b`.
+    let winsock_override = if enable_winsock_proxy {
+        Some("ws2_32=n,b".to_string())
+    } else {
+        None
+    };
     let log_path = wine_log_path()?;
     let log_file = OpenOptions::new()
         .create(true)
@@ -181,6 +203,14 @@ pub fn launch_ffxiv_game(
         cmd.current_dir(cwd);
     }
     runtime.configure_command_with_debug(&mut cmd, wine_debug_override);
+    if let Some(ovr) = &winsock_override {
+        // Setting the env var on the specific Command — not the parent
+        // process — keeps the override scoped to this launch. Wine
+        // reads WINEDLLOVERRIDES on process start so this happens
+        // before any DLL resolution inside the game.
+        cmd.env("WINEDLLOVERRIDES", ovr);
+        log::info!("WINEDLLOVERRIDES={}", ovr);
+    }
 
     log::info!("launching ffxivgame via wine; output → {}", log_path.display());
     let status = cmd.status().context("launching ffxivgame.exe via wine")?;
@@ -223,6 +253,104 @@ fn emit_log_tail(log_path: &Path) {
         }
         Err(e) => log::error!("could not read wine log {}: {e}", log_path.display()),
     }
+}
+
+/// Install or remove the `ws2_32.dll` hijack proxy in the game folder.
+///
+/// The proxy is a 32-bit Windows cdylib built out of the sibling
+/// `ws2_32-proxy` crate — `cargo build --release --target
+/// i686-pc-windows-gnu` inside `garlemald-client/ws2_32-proxy/`. Once
+/// built, the DLL lives at
+/// `ws2_32-proxy/target/i686-pc-windows-gnu/release/ws2_32.dll`.
+///
+/// When the Developer Setting toggle is on, we:
+///   1. Copy the real `drive_c/windows/system32/ws2_32.dll` out of the
+///      Wine prefix into `<game_dir>/ws2_32_real.dll`. The proxy's
+///      export table forwards every unhooked function to
+///      `ws2_32_real.X`, so this renamed copy is what keeps the game's
+///      actual networking alive.
+///   2. Copy the built proxy into `<game_dir>/ws2_32.dll`, winning the
+///      loader's search-order race against `system32`.
+///
+/// When the toggle is off — or on but the proxy hasn't been built — we
+/// remove both files so the stock loader path resumes. Errors here
+/// don't abort the launch: if the proxy can't be deployed, the user
+/// gets plain networking and a log line explaining why.
+fn apply_winsock_proxy(
+    _runtime: &WineRuntime,
+    game_dir: &Path,
+    enable: bool,
+) -> Result<()> {
+    let proxy_dest = game_dir.join("ws2_32.dll");
+    // Earlier versions of this launcher also deployed a renamed copy
+    // of Wine's real ws2_32 as `ws2_32_real.dll` and used PE `FORWARD`
+    // entries to route unhooked exports to it. That DllMain aborted
+    // under its non-canonical name (Wine's builtin init expects to
+    // find a matching `ws2_32.dll.so` for the Unix socket backend) —
+    // `err:module:loader_init "ws2_32_real.dll" failed ... c0000142`.
+    // The proxy now resolves the real DLL at runtime by absolute path
+    // (`C:\\windows\\syswow64\\ws2_32.dll`) and JMP-thunks every
+    // unhooked export, so the rename is no longer needed. Scrub any
+    // stale copy a previous launch might have left behind.
+    let legacy_real_copy = game_dir.join("ws2_32_real.dll");
+
+    if !enable {
+        for p in [&proxy_dest, &legacy_real_copy] {
+            if p.exists() && let Err(e) = std::fs::remove_file(p) {
+                log::warn!("failed to remove {}: {e}", p.display());
+            }
+        }
+        return Ok(());
+    }
+
+    let built_proxy = workspace_ws2_32_proxy_dll()
+        .context("locating the built ws2_32 proxy DLL")?;
+    if !built_proxy.exists() {
+        return Err(anyhow!(
+            "winsock tracing is on but the proxy DLL is missing at {}.\n\
+             Run `cargo build --release --target i686-pc-windows-gnu` inside\n\
+             garlemald-client/ws2_32-proxy before launching.",
+            built_proxy.display(),
+        ));
+    }
+
+    if legacy_real_copy.exists() {
+        let _ = std::fs::remove_file(&legacy_real_copy);
+    }
+    std::fs::copy(&built_proxy, &proxy_dest).with_context(|| {
+        format!(
+            "copying proxy DLL: {} -> {}",
+            built_proxy.display(),
+            proxy_dest.display()
+        )
+    })?;
+    log::info!(
+        "ws2_32 proxy installed: {}",
+        proxy_dest.display(),
+    );
+    log::info!(
+        "winsock traces will land at {}",
+        game_dir.join("ws2_32-trace.log").display()
+    );
+    Ok(())
+}
+
+/// Resolve the path to the pre-built ws2_32 proxy DLL. We expect the
+/// proxy crate to live at `ws2_32-proxy/` alongside this client's
+/// source tree (same directory as `Cargo.toml`), with the mingw-gnu
+/// cross-target output under `target/i686-pc-windows-gnu/release/`.
+fn workspace_ws2_32_proxy_dll() -> Result<PathBuf> {
+    // `CARGO_MANIFEST_DIR` at build time points at the client crate
+    // root. We embed it as a compile-time constant so the launched
+    // binary can find the proxy DLL even when invoked from a different
+    // cwd (e.g. the macOS `.app` bundle).
+    let client_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    Ok(client_root
+        .join("ws2_32-proxy")
+        .join("target")
+        .join("i686-pc-windows-gnu")
+        .join("release")
+        .join("ws2_32.dll"))
 }
 
 /// Copies `source_exe` to `dest_exe`, replacing `dest_exe` if it exists.

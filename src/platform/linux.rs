@@ -71,6 +71,7 @@ impl Platform for LinuxPlatform {
             &patched_exe,
             &launch_args.encoded_argument,
             request.wine_debug_override.as_deref(),
+            request.enable_winsock_proxy,
         )?;
         Ok(())
     }

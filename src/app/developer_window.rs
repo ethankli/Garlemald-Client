@@ -67,6 +67,24 @@ impl DeveloperModal {
                 ));
                 ui.small("No effect on the native Windows backend.");
 
+                ui.add_space(8.0);
+                ui.checkbox(
+                    &mut self.prefs.enable_winsock_tracing,
+                    "Enable winsock tracing (ws2_32 DLL-proxy)",
+                );
+                ui.add_space(2.0);
+                ui.small(
+                    "Deploys a ws2_32.dll hijack proxy into the game folder\n\
+                     that logs every send/recv/connect/closesocket call\n\
+                     the 1.23b client makes. Unhooked winsock functions are\n\
+                     forwarded to a renamed copy of the real DLL so normal\n\
+                     networking keeps working. Log lands at\n\
+                     <game_dir>/ws2_32-trace.log.\n\
+                     Requires a prebuilt ws2_32-proxy DLL — the launcher\n\
+                     looks under <install>/ws2_32-proxy/target/i686-pc-\n\
+                     windows-gnu/release/ws2_32.dll.",
+                );
+
                 ui.separator();
                 ui.horizontal(|ui| {
                     if ui.button("OK").clicked() {

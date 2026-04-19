@@ -17,6 +17,12 @@ pub struct GameLaunchRequest {
     /// set this on the child process env instead of the built-in default.
     /// Ignored by the native Windows backend.
     pub wine_debug_override: Option<String>,
+    /// When true, install the ws2_32 DLL-hijack proxy into the game
+    /// folder before launch so send/recv calls are logged to
+    /// `<game_dir>/ws2_32-trace.log`. When false, remove any previously
+    /// installed proxy files so stock networking resumes. Wine-only —
+    /// the native Windows backend ignores this.
+    pub enable_winsock_proxy: bool,
 }
 
 #[derive(Debug, Clone)]
