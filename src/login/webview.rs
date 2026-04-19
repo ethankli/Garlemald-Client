@@ -47,6 +47,9 @@ pub fn run_webview(login_url: &str) -> Result<()> {
             *control_flow = ControlFlow::Exit;
         }
     });
+
+    #[allow(unreachable_code)]
+    Ok(())
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
