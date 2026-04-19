@@ -12,10 +12,15 @@ use eframe::egui;
 use crate::config::DeveloperPreferences;
 
 /// `WINEDEBUG` value applied when "verbose Wine debug logging" is enabled.
-/// Aims for high-signal channels during login: DLL/module load tracing,
-/// winsock calls, SEH exceptions, thread ids — without `+relay`, which
-/// produces gigabytes of output on this 2010-era client.
-pub const VERBOSE_WINE_DEBUG: &str = "err+all,+seh,+tid,+loaddll,+module,+winsock";
+/// Adds `+ws2_32` on top of the original high-signal set so wine.log
+/// captures full winsock `send` / `recv` / `WSASend` / `WSARecv` payloads
+/// — the load-bearing signal for diagnosing "Now Loading" protocol
+/// divergence. `+relay` was tried here earlier and traces every Win32
+/// call but slowed the 1.23b client so badly that character creation
+/// wouldn't complete; keep it off unless you specifically need a full
+/// call trace and are willing to wait several minutes per UI step.
+pub const VERBOSE_WINE_DEBUG: &str =
+    "err+all,+seh,+tid,+loaddll,+module,+winsock,+ws2_32";
 
 #[derive(Debug, Clone)]
 pub enum DeveloperOutcome {
