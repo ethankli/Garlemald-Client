@@ -84,11 +84,18 @@ impl WineRuntime {
     }
 
     pub fn configure_command(&self, cmd: &mut Command) {
+        self.configure_command_with_debug(cmd, None);
+    }
+
+    /// Like [`configure_command`], but lets the caller inject a specific
+    /// `WINEDEBUG` value (e.g. from the Developer Settings dialog). When
+    /// `wine_debug` is `None`, behaviour matches the original default:
+    /// honour the parent env, else fall back to [`WINEDEBUG_DEFAULT`].
+    pub fn configure_command_with_debug(&self, cmd: &mut Command, wine_debug: Option<&str>) {
         cmd.env("WINEPREFIX", &self.prefix);
-        // Honor an explicit WINEDEBUG from the caller's env — makes it easy
-        // to temporarily crank verbosity without recompiling (e.g.
-        // `WINEDEBUG=+relay,+seh cargo run`).
-        if std::env::var_os("WINEDEBUG").is_none() {
+        if let Some(value) = wine_debug {
+            cmd.env("WINEDEBUG", value);
+        } else if std::env::var_os("WINEDEBUG").is_none() {
             cmd.env("WINEDEBUG", WINEDEBUG_DEFAULT);
         }
         #[cfg(target_os = "macos")]
@@ -138,6 +145,7 @@ pub fn launch_ffxiv_game(
     runtime: &WineRuntime,
     exe_path: &Path,
     encoded_argument: &str,
+    wine_debug_override: Option<&str>,
 ) -> Result<()> {
     let log_path = wine_log_path()?;
     let log_file = OpenOptions::new()
@@ -148,11 +156,12 @@ pub fn launch_ffxiv_game(
         .with_context(|| format!("opening wine log {}", log_path.display()))?;
     writeln!(
         &log_file,
-        "=== garlemald-client launch ===\nwine: {}\nexe:  {}\narg:  {}\nprefix: {}\n",
+        "=== garlemald-client launch ===\nwine: {}\nexe:  {}\narg:  {}\nprefix: {}\nWINEDEBUG: {}\n",
         runtime.wine_bin.display(),
         exe_path.display(),
         encoded_argument,
         runtime.prefix.display(),
+        wine_debug_override.unwrap_or("(default)"),
     )
     .ok();
 
@@ -171,7 +180,7 @@ pub fn launch_ffxiv_game(
     if let Some(cwd) = exe_path.parent() {
         cmd.current_dir(cwd);
     }
-    runtime.configure_command(&mut cmd);
+    runtime.configure_command_with_debug(&mut cmd, wine_debug_override);
 
     log::info!("launching ffxivgame via wine; output → {}", log_path.display());
     let status = cmd.status().context("launching ffxivgame.exe via wine")?;

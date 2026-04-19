@@ -4,6 +4,7 @@ use std::time::Duration;
 use anyhow::Result;
 use eframe::egui;
 
+use crate::app::developer_window::{DeveloperModal, DeveloperOutcome, VERBOSE_WINE_DEBUG};
 use crate::app::patcher_window::PatcherScreen;
 use crate::app::settings_window::{SettingsModal, SettingsOutcome};
 use crate::config::{bundled_config_path, data_dir, preferences_file_path, Preferences};
@@ -57,6 +58,7 @@ struct LauncherApp {
     dev_session_id: String,
     screen: Screen,
     settings_modal: Option<SettingsModal>,
+    developer_modal: Option<DeveloperModal>,
     login_task: Option<LoginTask>,
     outdated_prompt_open: bool,
     download_confirm: Option<DownloadConfirmState>,
@@ -106,6 +108,7 @@ impl LauncherApp {
             dev_session_id: String::new(),
             screen: Screen::Main,
             settings_modal: None,
+            developer_modal: None,
             login_task: None,
             outdated_prompt_open: false,
             download_confirm: None,
@@ -296,10 +299,16 @@ impl LauncherApp {
             self.set_error("No server address selected.");
             return;
         };
+        let wine_debug_override = if self.prefs.developer.enable_verbose_wine_debug {
+            Some(VERBOSE_WINE_DEBUG.to_string())
+        } else {
+            None
+        };
         let request = GameLaunchRequest {
             game_dir: game_dir.clone(),
             lobby_host: server_address.clone(),
             session_id,
+            wine_debug_override,
         };
         match crate::launcher::launch_game(&request) {
             Ok(()) => self.set_info(format!(
@@ -351,6 +360,10 @@ impl LauncherApp {
         ui.horizontal(|ui| {
             ui.label(format!("Version {APP_VERSION}"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Developer Settings…").clicked() {
+                    self.developer_modal =
+                        Some(DeveloperModal::new(&self.prefs.developer));
+                }
                 if ui.button("Game Settings…").clicked() {
                     let current = self.prefs.launcher.game_location.clone();
                     self.settings_modal = Some(SettingsModal::new(current.as_ref()));
@@ -468,6 +481,20 @@ impl LauncherApp {
                     self.prefs.launcher.game_location = new_location;
                     self.save_preferences();
                     self.settings_modal = None;
+                }
+            }
+        }
+
+        if let Some(modal) = self.developer_modal.as_mut() {
+            match modal.render(ctx) {
+                DeveloperOutcome::Open => {}
+                DeveloperOutcome::Cancelled => {
+                    self.developer_modal = None;
+                }
+                DeveloperOutcome::Accepted(new_prefs) => {
+                    self.prefs.developer = new_prefs;
+                    self.save_preferences();
+                    self.developer_modal = None;
                 }
             }
         }

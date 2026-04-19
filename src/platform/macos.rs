@@ -141,7 +141,12 @@ impl Platform for MacosPlatform {
         ];
         apply_patches_on_disk(&patched_exe, &patches)?;
 
-        launch_ffxiv_game(&runtime, &patched_exe, &launch_args.encoded_argument)?;
+        launch_ffxiv_game(
+            &runtime,
+            &patched_exe,
+            &launch_args.encoded_argument,
+            request.wine_debug_override.as_deref(),
+        )?;
         Ok(())
     }
 }

@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 pub struct Preferences {
     #[serde(default)]
     pub launcher: LauncherPreferences,
+    #[serde(default)]
+    pub developer: DeveloperPreferences,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -22,6 +24,19 @@ pub struct LauncherPreferences {
     pub wine_runtime_dir: Option<PathBuf>,
     #[serde(default)]
     pub patch_download_dir: Option<PathBuf>,
+}
+
+/// Developer-only knobs surfaced in the Developer Settings dialog. Off by
+/// default — enabling any of these trades runtime speed or log-file size
+/// for visibility into the login / Now-Loading handshake.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeveloperPreferences {
+    /// When true, overrides the default `WINEDEBUG` channel set with a
+    /// verbose selection that covers DLL loads, winsock calls, structured
+    /// exceptions, and thread ids. Wine's own output still lands in
+    /// `<data_dir>/logs/wine.log`; this flag just raises the ceiling.
+    #[serde(default)]
+    pub enable_verbose_wine_debug: bool,
 }
 
 impl Preferences {

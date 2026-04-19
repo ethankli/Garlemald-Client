@@ -1,3 +1,4 @@
+mod developer_window;
 mod launcher_window;
 mod patcher_window;
 mod settings_window;

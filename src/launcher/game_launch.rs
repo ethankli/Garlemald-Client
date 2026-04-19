@@ -13,6 +13,10 @@ pub struct GameLaunchRequest {
     pub game_dir: PathBuf,
     pub lobby_host: String,
     pub session_id: String,
+    /// Optional `WINEDEBUG` override. When `Some`, the Wine-based backends
+    /// set this on the child process env instead of the built-in default.
+    /// Ignored by the native Windows backend.
+    pub wine_debug_override: Option<String>,
 }
 
 #[derive(Debug, Clone)]
