@@ -1,4 +1,15 @@
+# Bundled server list. Entries appear in the launcher's dropdown in the
+# order below. `Localhost` points at the sibling garlemald-server's Rust
+# login endpoint. `Project Meteor` points at the upstream PHP login_su
+# web server that ships with the C# Project Meteor reference impl --
+# handy when running it as a differential test against garlemald-server.
+
 [[server]]
 name = "Localhost"
 address = "127.0.0.1"
 login_url = "http://127.0.0.1:54993/login"
+
+[[server]]
+name = "Project Meteor"
+address = "127.0.0.1"
+login_url = "http://127.0.0.1:8080/login.php"

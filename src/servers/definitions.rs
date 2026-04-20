@@ -77,6 +77,11 @@ mod tests {
         assert_eq!(local.login_url, "http://127.0.0.1:54993/login");
         let first = defs.iter().next().expect("at least one server");
         assert_eq!(first.name, "Localhost");
+
+        // Project Meteor's PHP login_su runs at 8080, not 54993 (which is
+        // the Map Server's game-protocol TCP listener in that codebase).
+        let meteor = defs.get("Project Meteor").expect("Project Meteor present");
+        assert_eq!(meteor.login_url, "http://127.0.0.1:8080/login.php");
     }
 
     #[test]
