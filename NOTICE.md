@@ -34,10 +34,39 @@ the game binary. The launcher's behavior, PE-patching approach, and
 1.x client quirks documented in Seventh Umbral's source are the basis
 for the corresponding logic in this crate.
 
+## LandSandBoat (sister-project, FFXI reference)
+
+- Source: <https://github.com/LandSandBoat/server>
+- License: GNU General Public License v3.0 (GPL-3.0)
+- Upstream lineage: LandSandBoat is a community fork of the original
+  **DarkStar Project** FFXI server emulator (source-file headers in
+  the tree still carry `Copyright (c) 2010-2015 Darkstar Dev Teams`);
+  both lineages are credited here
+
+LandSandBoat is an actively-maintained open-source **Final Fantasy XI**
+private server. `garlemald-client` does **not** derive code from
+LandSandBoat directly — the launcher is an FFXIV 1.x tool (patch
+apply, PE hostname injection, WebView login, Wine prefix management)
+and has no FFXI-side logic. LandSandBoat is acknowledged here because
+the sister project [`garlemald-server`](https://github.com/swstegall/Garlemald-Server)
+that this launcher is built to connect to uses LandSandBoat as a
+structural reference for the XI-inherited portions of FFXIV 1.x
+gameplay (combat, mob AI, enmity, skillchain, status effects, mod
+shelf). Credit therefore flows through the server to the launcher at
+the workspace level.
+
+If any future client-side feature — cross-validation of a Blowfish
+session handshake against LandSandBoat's `src/common/blowfish.cpp`,
+for example — draws on LandSandBoat source directly, a specific
+derivation entry will be added to this NOTICE at that time and the
+GPL-3 → AGPL-3 combined-work rule (§13 of GPLv3) documented in
+`garlemald-server/NOTICE.md` will apply identically here.
+
 ## Acknowledgments
 
 Thanks to Ioncannon, Jean-Philip Desjardins, and every contributor to
-Project Meteor Server, Seventh Umbral, the FFXIV Classic wiki
+Project Meteor Server, Seventh Umbral, the LandSandBoat and DarkStar
+Project developer teams (past and present), the FFXIV Classic wiki
 (<http://ffxivclassic.fragmenterworks.com/wiki/>), and the wider
 community of 1.0 preservationists whose notes, spreadsheets, and
 packet captures made this port feasible.

@@ -55,9 +55,14 @@ scripts/package-macos.sh --universal   # x86_64 + aarch64 fat binary
 Garlemald Client derives from upstream projects under copyleft and
 permissive licenses. See [`NOTICE.md`](NOTICE.md) for attribution to
 Project Meteor Server, Seventh Umbral, and the wider FFXIV 1.0
-preservationist community, and [`LICENSE.md`](LICENSE.md) for the full
-terms of the **GNU Affero General Public License, version 3 or later**,
-under which this project is distributed.
+preservationist community — plus a companion acknowledgment of
+[LandSandBoat](https://github.com/LandSandBoat/server) (and its
+**DarkStar Project** ancestor), the FFXI server emulator that the
+sister project `garlemald-server` uses as its structural reference
+for the XI-inherited portions of FFXIV 1.x gameplay. See
+[`LICENSE.md`](LICENSE.md) for the full terms of the
+**GNU Affero General Public License, version 3 or later**, under
+which this project is distributed.
 
 ## Sister projects
 
