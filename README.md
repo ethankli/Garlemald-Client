@@ -1,29 +1,42 @@
 # Garlemald Client
 
-A cross-platform launcher for **FINAL FANTASY XIV v1.23b** (the original
-1.0 iteration of the game, not A Realm Reborn). It detects an installed
-1.x client, patches it up to `2012.09.19.0001`, runs the login flow,
-and launches `ffxivgame.exe` against a private server — on macOS
-(including Apple Silicon), Linux, and Windows from the same codebase.
-On macOS and Linux it also downloads and manages its own Wine runtime,
-so there is nothing to install beyond the launcher itself.
+[![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE.md)
+[![Rust](https://img.shields.io/badge/rust-1.95-orange.svg)](rust-toolchain.toml)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](#build)
+[![Discord](https://img.shields.io/badge/discord-join-5865F2.svg)](https://discord.gg/CVjwWs6jnX)
+
+A cross-platform launcher for **FINAL FANTASY XIV v1.23b** — the
+original 1.0 iteration of the game, not A Realm Reborn.
+
+Garlemald Client detects an installed 1.x client, patches it forward to
+`2012.09.19.0001`, runs the login handshake against a private server,
+and launches `ffxivgame.exe` from the same Rust codebase on macOS
+(including Apple Silicon), Linux, and Windows. On macOS and Linux it
+also downloads and manages its own Wine runtime, so there is nothing
+to install beyond the launcher itself.
 
 > Created with [Claude](https://claude.ai/).
 
-## Attribution and licensing
+## Highlights
 
-Garlemald Client derives from upstream projects under copyleft and
-permissive licenses. See [`NOTICE.md`](NOTICE.md) for attribution to
-Project Meteor Server, Seventh Umbral, and the wider 1.0
-preservationist community, and [`LICENSE.md`](LICENSE.md) for the full
-terms of the GNU Affero General Public License, version 3 or later,
-under which this project is distributed.
+- Single Rust codebase targeting macOS (Apple Silicon and Intel),
+  Linux, and Windows
+- Automatic detection of existing FFXIV 1.x installs — CrossOver
+  bottles, Whisky prefixes, and manual Wine installs all work
+- Self-managed Wine runtime on non-Windows hosts; no external Wine
+  setup required
+- CRC32-verified patch download and ZiPatch apply, `2010.09.18.0000` →
+  `2012.09.19.0001`
+- Embedded WebView login flow with session-token handoff to the game
+  binary
+- Lobby hostname injected into the PE at launch time, so the same
+  client binary can target any private server
 
 ## Build
 
-Requires Rust 1.95.0 (pinned in `rust-toolchain.toml`; `rustup` installs
-it automatically on first build). On Linux, `gtk3` and `webkit2gtk-4.1`
-runtime libraries are needed for the login WebView.
+Requires Rust 1.95.0 (pinned in `rust-toolchain.toml`; `rustup`
+installs it automatically on first build). On Linux, `gtk3` and
+`webkit2gtk-4.1` runtime libraries are needed for the login WebView.
 
 ```bash
 cargo build --release
@@ -37,6 +50,15 @@ scripts/package-macos.sh               # host arch, ad-hoc signed
 scripts/package-macos.sh --universal   # x86_64 + aarch64 fat binary
 ```
 
+## Attribution and licensing
+
+Garlemald Client derives from upstream projects under copyleft and
+permissive licenses. See [`NOTICE.md`](NOTICE.md) for attribution to
+Project Meteor Server, Seventh Umbral, and the wider FFXIV 1.0
+preservationist community, and [`LICENSE.md`](LICENSE.md) for the full
+terms of the **GNU Affero General Public License, version 3 or later**,
+under which this project is distributed.
+
 ## Sister projects
 
 - [**Garlemald-Server**](https://github.com/swstegall/Garlemald-Server)
@@ -48,7 +70,7 @@ scripts/package-macos.sh --universal   # x86_64 + aarch64 fat binary
 
 ## Community
 
-Questions, bug reports, or just want to talk to the developer about the
-project? Join the Discord:
+Questions, bug reports, or just want to talk about the project?
+Join the Discord:
 
 <https://discord.gg/CVjwWs6jnX>
