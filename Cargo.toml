@@ -4,7 +4,11 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 description = "Cross-platform launcher for Final Fantasy XIV 1.x private servers"
-license = "MIT"
+license = "AGPL-3.0-or-later"
+build = "build.rs"
+
+[build-dependencies]
+winresource = "0.1"
 
 [dependencies]
 anyhow = "1"

@@ -106,6 +106,9 @@ if exist "%PROJECT_DIR%\configs\garlemald-client.toml" (
 )
 if exist "%PROJECT_DIR%\README.md" copy /y "%PROJECT_DIR%\README.md" "%PKG_DIR%\" >nul
 if exist "%PROJECT_DIR%\LICENSE"   copy /y "%PROJECT_DIR%\LICENSE"   "%PKG_DIR%\" >nul
+rem icon.ico is already embedded into the exe via build.rs; we also ship
+rem a sidecar copy so users can pin a custom shortcut to it if they want.
+if exist "%PROJECT_DIR%\assets\icon.ico" copy /y "%PROJECT_DIR%\assets\icon.ico" "%PKG_DIR%\" >nul
 
 echo ==^> Creating zip at %ZIP_PATH%
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
