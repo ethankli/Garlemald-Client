@@ -42,7 +42,8 @@ use anyhow::{anyhow, Context, Result};
 use crate::config;
 use crate::crypto;
 use crate::launcher::{
-    apply_patches_on_disk, encryption_time_patch, lobby_host_patch, GameLaunchRequest,
+    apply_patches_on_disk, assert_log_patch, encryption_time_patch, lobby_host_patch,
+    GameLaunchRequest,
 };
 use crate::platform::wine::{
     copy_exe_for_patching, ensure_prefix_initialized, launch_ffxiv_game, monotonic_ms_since_boot, WineRuntime,
@@ -156,6 +157,7 @@ impl Platform for MacosPlatform {
         let patches = vec![
             encryption_time_patch(),
             lobby_host_patch(&request.lobby_host)?,
+            assert_log_patch(),
         ];
         apply_patches_on_disk(&patched_exe, &patches)?;
 

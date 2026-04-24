@@ -37,6 +37,10 @@ pub const ENCRYPTION_TIME_PATCH_RVA: u32 = 0x9A15E3;
 pub const LOBBY_HOST_NAME_RVA: u32 = 0xB90110;
 pub const LOBBY_HOST_NAME_SLOT_SIZE: usize = 0x14;
 
+/// File offset of the indirect `call *[0x012651B4]` inside the game's
+/// fatal-assert handler (entry at `0x00A48B30`). See `ASSERT_LOG_PATCH_BYTES`.
+pub const ASSERT_LOG_PATCH_RVA: u32 = 0x648BBF;
+
 /// Replaces a `call <unix-time-from-GetSystemTimeAsFileTime helper>`
 /// (5-byte `E8 rel32`) with `mov eax, 0x50E0E812` (5-byte `B8 imm32`),
 /// pinning the game's notion of "current server UTC" to
@@ -44,6 +48,67 @@ pub const LOBBY_HOST_NAME_SLOT_SIZE: usize = 0x14;
 /// 1.x servers were retired). Without this, the game reads a 2026 timestamp
 /// from the host and rejects it as far in the future of `SERVER_UTC`.
 pub const ENCRYPTION_TIME_PATCH_BYTES: [u8; 5] = [0xB8, 0x12, 0xE8, 0xE0, 0x50];
+
+/// Replaces the 16-byte `call *[0x012651B4] ; movl $0, [0]` block at
+/// `0x00A48BBF` inside the game's fatal-assert handler — the single call
+/// that dispatches the formatted assertion text to a runtime-configurable
+/// log callback, plus the deliberate null-pointer-write trap immediately
+/// after.
+///
+/// Default behaviour: the callback at `[0x012651B4]` points at a no-op
+/// `ret` stub (`0x006CE2E0`), so the assertion message is silently
+/// dropped, then the trap fires and Wine reports `c0000005 at
+/// 0x00A48BC5` with no clue which assertion failed.
+///
+/// New behaviour:
+///
+/// ```text
+///   before:
+///     A48BBF: FF 15 B4 51 26 01            call dword ptr [0x012651B4]
+///     A48BC5: C7 05 00 00 00 00 00 00 00 00 movl $0, [0]   (trap)
+///   after:
+///     A48BBF: FF 15 64 E1 F3 00            call dword ptr [0x00F3E164]
+///     A48BC5: 8D 64 24 FC                  lea esp, [esp-4]
+///     A48BC9: 90 90 90 90 90 90            nop * 6
+/// ```
+///
+/// The patch does two things at once:
+///
+/// 1. Swaps the indirect call for a direct `call *[0x00F3E164]` (IAT entry
+///    for `OutputDebugStringA`). The assert handler's local buffer
+///    pointer is in `edx`, pushed as the first argument; `OutputDebugStringA`
+///    is stdcall and pops that 4-byte arg via `ret 4`. The original
+///    handler was cdecl (no-op `ret`), so we have a 4-byte deficit.
+/// 2. Replaces the trap with `lea esp, [esp-4]` to repay the deficit, so
+///    the existing `addl $0x808, esp ; ret` epilogue at `0x00A48BCF`
+///    restores the stack exactly and returns cleanly to the caller.
+///
+/// The leftover `6` (severity) and the dummy 4 bytes from the `lea` get
+/// folded into the `0x808` epilogue restore — none of this is observable
+/// to the caller. Callers of the assert handler are cdecl with 5
+/// arguments and clean up via `add esp, 0x14` themselves.
+///
+/// Net effect: assertions that would have killed the process now log to
+/// `OutputDebugStringA` and return. For the cinematic case the failing
+/// assertion is `StretchRect` returning `WINEDDERR_SURFACEBUSY` from a
+/// per-frame race in WineD3D's surface lock-tracking (the game allows
+/// `StretchRect` from a locked surface; native D3D9 silently serialises,
+/// WineD3D rejects). With the trap removed, the stale frame is dropped
+/// and the next frame's StretchRect proceeds.
+///
+/// We deliberately do not touch the warning handler at `0x00A49380` —
+/// that one already returns to its caller and is correctly cdecl, so it
+/// needs no patch.
+///
+/// Pairs with `WINEDEBUG=...,+debugstr` in `WINEDEBUG_DEFAULT` so the
+/// forwarded message lands in `wine.log`. The IAT entry for
+/// `OutputDebugStringA` is at VMA `0x00F3E164`; this is stable across the
+/// binary because relocations are stripped.
+pub const ASSERT_LOG_PATCH_BYTES: [u8; 16] = [
+    0xFF, 0x15, 0x64, 0xE1, 0xF3, 0x00, // call dword ptr [0x00F3E164]
+    0x8D, 0x64, 0x24, 0xFC, // lea esp, [esp-4]   (repay stdcall's 4-byte pop)
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // nop * 6
+];
 
 #[derive(Debug, Clone)]
 pub struct PePatch {
@@ -55,6 +120,13 @@ pub fn encryption_time_patch() -> PePatch {
     PePatch {
         rva: ENCRYPTION_TIME_PATCH_RVA,
         bytes: ENCRYPTION_TIME_PATCH_BYTES.to_vec(),
+    }
+}
+
+pub fn assert_log_patch() -> PePatch {
+    PePatch {
+        rva: ASSERT_LOG_PATCH_RVA,
+        bytes: ASSERT_LOG_PATCH_BYTES.to_vec(),
     }
 }
 
@@ -174,5 +246,18 @@ mod tests {
         let p = encryption_time_patch();
         assert_eq!(p.bytes.len(), 5);
         assert_eq!(p.rva, ENCRYPTION_TIME_PATCH_RVA);
+    }
+
+    #[test]
+    fn assert_log_patch_is_sixteen_bytes() {
+        let p = assert_log_patch();
+        assert_eq!(p.bytes.len(), 16);
+        assert_eq!(p.rva, ASSERT_LOG_PATCH_RVA);
+        // call dword ptr [0x00F3E164]
+        assert_eq!(&p.bytes[0..6], &[0xFF, 0x15, 0x64, 0xE1, 0xF3, 0x00]);
+        // lea esp, [esp-4]
+        assert_eq!(&p.bytes[6..10], &[0x8D, 0x64, 0x24, 0xFC]);
+        // padding nops
+        assert_eq!(&p.bytes[10..16], &[0x90; 6]);
     }
 }
