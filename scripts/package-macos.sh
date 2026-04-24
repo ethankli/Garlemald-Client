@@ -23,7 +23,7 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 APP_DISPLAY_NAME="Garlemald Client"
 BINARY_NAME="garlemald-client"
-BUNDLE_ID="org.seventhumbral.garlemald-client"
+BUNDLE_ID="me.stegall.garlemald-client"
 
 UNIVERSAL=0
 SIGN_IDENTITY="-" # ad-hoc by default; see `man codesign`
