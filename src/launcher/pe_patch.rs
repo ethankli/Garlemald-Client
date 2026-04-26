@@ -41,6 +41,31 @@ pub const LOBBY_HOST_NAME_SLOT_SIZE: usize = 0x14;
 /// fatal-assert handler (entry at `0x00A48B30`). See `ASSERT_LOG_PATCH_BYTES`.
 pub const ASSERT_LOG_PATCH_RVA: u32 = 0x648BBF;
 
+/// File offset of a 21-byte byte-getter helper at VA 0x00892550 — first
+/// instruction is `mov ecx, [ecx+4]` against a __thiscall `this`. The
+/// game reaches this with `ecx = NULL` from at least one of its 8
+/// caller sites (we observe the crash hit ~30 s into the boat-zone
+/// session, immediately after the cinematic / movement-tutorial path
+/// dismisses), so the very first instruction reads `[0+4] = 4` and
+/// raises `c0000005` with `info[1] = 4`. The pattern is "fetch
+/// `this->m_member` then virtual-call its method 5, copy the byte
+/// result through the stdcall out-pointer arg" — i.e. a polled
+/// state-byte getter.
+pub const NULL_THIS_GUARD_PATCH_RVA: u32 = 0x492550;
+
+/// File offset of a follow-on null-deref inside the same enclosing
+/// function (SEH handler at 0x00EBD988, span 0x00894AB0..0x00894BBD).
+/// After the byte-getter call at 0x00894B5D returns, the function
+/// reloads `esi = this->member8` and immediately does
+/// `mov BYTE PTR [esi+0x20], 0`. With `member8 == NULL` (the same
+/// uninitialised member that fed the crashing getter), the 4-byte
+/// write at VA 0x00894B70 faults on `info[1]=0x20`. Since member8 is
+/// null there is no real object to zero, so we simply NOP the write
+/// — the warm path (member8 != NULL) loses one zero-init store, which
+/// the surrounding SEH-protected reset routine retries on its next
+/// tick anyway.
+pub const NULL_MEMBER8_WRITE_NOP_RVA: u32 = 0x494B70;
+
 /// Replaces a `call <unix-time-from-GetSystemTimeAsFileTime helper>`
 /// (5-byte `E8 rel32`) with `mov eax, 0x50E0E812` (5-byte `B8 imm32`),
 /// pinning the game's notion of "current server UTC" to
@@ -110,6 +135,70 @@ pub const ASSERT_LOG_PATCH_BYTES: [u8; 16] = [
     0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // nop * 6
 ];
 
+/// 29-byte rewrite of the 21-byte helper at `NULL_THIS_GUARD_PATCH_RVA`
+/// to short-circuit the null-`this` case. There are 11 bytes of `cc`
+/// padding after the original `ret 4` (next function starts at the
+/// 0x20-aligned slot 0x00892570), so we have 32 bytes of headroom and
+/// the rewrite fits without disturbing the next function.
+///
+/// ```text
+///   before (21 bytes + cc padding):
+///     892550: 8B 49 04                mov ecx, [ecx+4]    ; <-- crashes when ecx=0
+///     892553: 8B 01                   mov eax, [ecx]
+///     892555: 8B 50 14                mov edx, [eax+14h]
+///     892558: FF D2                   call edx
+///     89255A: 8A 08                   mov cl,  [eax]
+///     89255C: 8B 44 24 04             mov eax, [esp+4]    ; out-byte ptr
+///     892560: 88 08                   mov [eax], cl
+///     892562: C2 04 00                ret 4
+///     892565: cc * 11                 (padding)
+///
+///   after (29 bytes + cc padding):
+///     892550: 85 C9                   test ecx, ecx
+///     892552: 74 0E                   je  default          ; if (this == 0) default path
+///     892554: 8B 49 04                mov ecx, [ecx+4]
+///     892557: 8B 01                   mov eax, [ecx]
+///     892559: 8B 50 14                mov edx, [eax+14h]
+///     89255C: FF D2                   call edx
+///     89255E: 8A 08                   mov cl,  [eax]
+///     892560: EB 02                   jmp store
+///     892562: 30 C9             default:  xor cl, cl       ; default byte = 0
+///     892564: 8B 44 24 04       store: mov eax, [esp+4]
+///     892568: 88 08                   mov [eax], cl
+///     89256A: C2 04 00                ret 4
+///     89256D: cc cc cc                (residual padding from original)
+/// ```
+///
+/// Net behaviour: if `this == 0`, the helper writes a default byte of
+/// `0` through the out-pointer and returns cleanly instead of
+/// dereferencing null. The 8 known callers feed the result into a
+/// branch whose "0" arm is the safer "feature-not-active /
+/// default" path, which is the same value they would have observed if
+/// the underlying state object had been initialised but unset. The
+/// non-null case is byte-for-byte the original instruction stream, so
+/// gameplay performance and behaviour for the warm path is unchanged.
+pub const NULL_THIS_GUARD_PATCH_BYTES: [u8; 29] = [
+    0x85, 0xC9, // test ecx, ecx
+    0x74, 0x0E, // je +0x0E (target 0x892562)
+    0x8B, 0x49, 0x04, // mov ecx, [ecx+4]   (original first instruction)
+    0x8B, 0x01, // mov eax, [ecx]
+    0x8B, 0x50, 0x14, // mov edx, [eax+14h]
+    0xFF, 0xD2, // call edx
+    0x8A, 0x08, // mov cl, [eax]
+    0xEB, 0x02, // jmp +2 (skip xor)
+    0x30, 0xC9, // xor cl, cl    (default for null-this path)
+    0x8B, 0x44, 0x24, 0x04, // mov eax, [esp+4]
+    0x88, 0x08, // mov [eax], cl
+    0xC2, 0x04, 0x00, // ret 4
+];
+
+/// 4-byte NOP-out of `mov BYTE PTR [esi+0x20], 0` at VA 0x00894B70.
+/// See `NULL_MEMBER8_WRITE_NOP_RVA` for the rationale. The next
+/// instruction at VA 0x00894B74 (`mov BYTE PTR [esp+0x8C], 0`) is
+/// untouched — that one writes a stack local, never depends on `esi`,
+/// and is part of the function's normal book-keeping.
+pub const NULL_MEMBER8_WRITE_NOP_BYTES: [u8; 4] = [0x90, 0x90, 0x90, 0x90];
+
 #[derive(Debug, Clone)]
 pub struct PePatch {
     pub rva: u32,
@@ -127,6 +216,20 @@ pub fn assert_log_patch() -> PePatch {
     PePatch {
         rva: ASSERT_LOG_PATCH_RVA,
         bytes: ASSERT_LOG_PATCH_BYTES.to_vec(),
+    }
+}
+
+pub fn null_this_guard_patch() -> PePatch {
+    PePatch {
+        rva: NULL_THIS_GUARD_PATCH_RVA,
+        bytes: NULL_THIS_GUARD_PATCH_BYTES.to_vec(),
+    }
+}
+
+pub fn null_member8_write_nop_patch() -> PePatch {
+    PePatch {
+        rva: NULL_MEMBER8_WRITE_NOP_RVA,
+        bytes: NULL_MEMBER8_WRITE_NOP_BYTES.to_vec(),
     }
 }
 

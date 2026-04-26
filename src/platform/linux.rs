@@ -27,6 +27,7 @@ use crate::config;
 use crate::crypto;
 use crate::launcher::{
     apply_patches_on_disk, assert_log_patch, encryption_time_patch, lobby_host_patch,
+    null_member8_write_nop_patch, null_this_guard_patch,
     GameLaunchRequest,
 };
 use crate::platform::wine::{
@@ -86,6 +87,8 @@ impl Platform for LinuxPlatform {
             encryption_time_patch(),
             lobby_host_patch(&request.lobby_host)?,
             assert_log_patch(),
+            null_this_guard_patch(),
+            null_member8_write_nop_patch(),
         ];
         apply_patches_on_disk(&patched_exe, &patches)?;
 
