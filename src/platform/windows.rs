@@ -72,12 +72,9 @@ fn launch_and_patch(game_dir: &Path, lobby_host: &str, session_id: &str) -> Resu
     use std::ffi::CString;
 
     use windows::core::PCSTR;
-    use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE};
+    use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::Debug::{
-        GetThreadContext, ReadProcessMemory, WriteProcessMemory, CONTEXT, CONTEXT_FULL_X86,
-    };
-    use windows::Win32::System::Memory::{
-        VirtualProtectEx, PAGE_PROTECTION_FLAGS, PAGE_READWRITE,
+        GetThreadContext, ReadProcessMemory, CONTEXT, CONTEXT_FULL_X86,
     };
     use windows::Win32::System::Threading::{
         CreateProcessA, ResumeThread, TerminateProcess, CREATE_SUSPENDED,
@@ -174,6 +171,13 @@ fn launch_and_patch(game_dir: &Path, lobby_host: &str, session_id: &str) -> Resu
         return Err(e);
     }
 
+    if let Err(e) = cap_cpu_affinity(proc_info.hProcess) {
+        unsafe {
+            let _ = TerminateProcess(proc_info.hProcess, 1);
+        }
+        return Err(e);
+    }
+
     unsafe {
         ResumeThread(proc_info.hThread);
         let _ = CloseHandle(proc_info.hProcess);
@@ -182,7 +186,41 @@ fn launch_and_patch(game_dir: &Path, lobby_host: &str, session_id: &str) -> Resu
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
+/// FFXIV 1.x crashes immediately at launch on hosts where 16 or more
+/// logical CPUs are visible to the process. Restrict the child to at most
+/// 15 of the CPUs it was already allowed to run on.
+fn cap_cpu_affinity(process: windows::Win32::Foundation::HANDLE) -> Result<()> {
+    use windows::Win32::System::Threading::{GetProcessAffinityMask, SetProcessAffinityMask};
+
+    const MAX_CPUS: u32 = 15;
+
+    let mut process_mask: usize = 0;
+    let mut system_mask: usize = 0;
+    unsafe { GetProcessAffinityMask(process, &mut process_mask, &mut system_mask) }
+        .context("GetProcessAffinityMask failed")?;
+
+    if (process_mask as u64).count_ones() <= MAX_CPUS {
+        return Ok(());
+    }
+
+    let mut new_mask: usize = 0;
+    let mut taken: u32 = 0;
+    for bit in 0..(std::mem::size_of::<usize>() * 8) {
+        let b: usize = 1 << bit;
+        if process_mask & b != 0 {
+            new_mask |= b;
+            taken += 1;
+            if taken == MAX_CPUS {
+                break;
+            }
+        }
+    }
+
+    unsafe { SetProcessAffinityMask(process, new_mask) }
+        .context("SetProcessAffinityMask failed")?;
+    Ok(())
+}
+
 fn write_remote(
     process: windows::Win32::Foundation::HANDLE,
     remote_addr: usize,
