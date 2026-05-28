@@ -132,6 +132,17 @@ cat > "$CONTENTS_DIR/Info.plist" <<EOF
     <true/>
     <key>NSSupportsAutomaticGraphicsSwitching</key>
     <true/>
+    <!--
+      The embedded login flow uses WKWebView (via wry). Our login endpoints
+      can be plain HTTP for localhost or self-hosted private servers, and ATS
+      blocks those by default in bundled apps, which shows up as a blank white
+      webview. Limit the relaxation to web content only.
+    -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoadsInWebContent</key>
+        <true/>
+    </dict>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>

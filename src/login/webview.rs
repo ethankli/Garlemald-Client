@@ -52,7 +52,13 @@ pub fn run_webview(login_url: &str) -> Result<()> {
         .build(&event_loop)
         .context("building tao login window")?;
 
-    let _webview = build_webview(&window, login_url)?;
+    let _webview = match build_webview(&window, login_url) {
+        Ok(webview) => webview,
+        Err(err) => {
+            report_line(&format!("{ERROR_PREFIX}{err:#}"));
+            return Err(err);
+        }
+    };
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
