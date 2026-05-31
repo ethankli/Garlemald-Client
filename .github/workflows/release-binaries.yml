@@ -116,6 +116,7 @@ jobs:
           fi
 
       - name: Import Developer ID cert into a temporary keychain
+        id: importcert
         if: runner.os == 'macOS' && steps.macsign.outputs.enabled == 'true'
         env:
           CERT_P12: ${{ secrets.MACOS_CERT_P12_BASE64 }}
@@ -137,9 +138,11 @@ jobs:
           security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$CERT_PWD" -T /usr/bin/codesign
           # Let codesign use the key non-interactively.
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PWD" "$KC" >/dev/null
-          # Put our keychain first in the user search list (preserving the existing
-          # ones) so codesign finds the identity. Parse line-by-line so a keychain
-          # path containing whitespace can't word-split.
+          # Make codesign find the identity. The search list alone is NOT enough —
+          # codesign searches the DEFAULT keychain, so set ours as default, and also
+          # prepend it to the search list (preserving existing entries; parsed
+          # line-by-line so a path with whitespace can't word-split).
+          security default-keychain -s "$KC"
           existing=()
           while IFS= read -r kc; do
             kc="$(printf '%s' "$kc" | sed -E 's/^[[:space:]]*"?//; s/"?[[:space:]]*$//')"
@@ -147,13 +150,27 @@ jobs:
           done < <(security list-keychains -d user)
           security list-keychains -d user -s "$KC" "${existing[@]}"
           rm -f "$RUNNER_TEMP/cert.p12"
+          # Derive the signing identity BY SHA-1 HASH straight from the keychain —
+          # immune to any name-string mismatch (the other common "no identity found"
+          # cause). codesign --sign accepts the hash directly. NOTE: no `-v` — that
+          # filters to chain-VALID identities, which drops the cert if the runner is
+          # missing the Apple intermediate; codesign only needs the cert+key (present).
+          security find-identity -p codesigning "$KC"
+          IDENTITY="$(security find-identity -p codesigning "$KC" | awk '/Developer ID Application/{print $2; exit}')"
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::No 'Developer ID Application' code-signing identity found after import. Ensure the .p12 contains a Developer ID Application cert AND its private key."
+            exit 1
+          fi
+          echo "identity=$IDENTITY" >> "$GITHUB_OUTPUT"
+          echo "Signing with identity (SHA-1): $IDENTITY"
 
       - name: Build + package the universal .app
         if: runner.os == 'macOS'
         shell: bash
         env:
           SIGN_ENABLED: ${{ steps.macsign.outputs.enabled }}
-          SIGN_IDENTITY: ${{ secrets.MACOS_CERT_IDENTITY }}
+          # The SHA-1 hash derived from the imported cert (immune to name mismatch).
+          SIGN_IDENTITY: ${{ steps.importcert.outputs.identity }}
         run: |
           set -euo pipefail
           tag="${{ steps.tag.outputs.tag }}"
