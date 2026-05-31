@@ -1,0 +1,193 @@
+name: Release binaries
+
+# Builds the launcher per platform in its idiomatic packaging and attaches the
+# artifacts + SHA-256 checksums to the GitHub Release for the pushed vX.Y.Z tag.
+# See issue #10. Kept consistent with Garlemald-Server's release-binaries.yml (#15),
+# differing only in the desktop-native bundle formats (.app / .zip / .tar.gz).
+#
+# Pipeline (per merge to main): CI gate (#9) -> SemVer bump + tag push (#8,
+# release.yml) -> THIS workflow. It fires on the tag push because release.yml pushes
+# the tag with RELEASE_PAT (a PAT push triggers downstream workflows; the default
+# GITHUB_TOKEN would not) and the tagged bump commit is NOT marked [skip ci].
+# The matching Release is normally already created (notes-only) by release.yml; this
+# workflow attaches the artifacts to it idempotently.
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build + attach artifacts for, e.g. v0.1.1"
+        required: true
+
+# Per-tag group so re-runs/dispatches for one tag serialize, while different tags
+# don't block each other. Distinct from release.yml's "release" group.
+concurrency:
+  group: release-binaries-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+# Least privilege: build jobs only read; the aggregator job is granted write.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `target` labels the artifact; `rust_target` is what the toolchain adds.
+          # macOS produces ONE universal (.app) covering arm64 + Intel via
+          # scripts/package-macos.sh --universal (aarch64 is the host; we add x86_64).
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu, rust_target: x86_64-unknown-linux-gnu }
+          - { os: macos-latest,   target: universal-apple-darwin,   rust_target: x86_64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,   rust_target: x86_64-pc-windows-msvc }
+    steps:
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout at the tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - name: Install pinned toolchain + target
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          # No `toolchain:` -> honors rust-toolchain.toml (1.95.0); add the matrix target.
+          target: ${{ matrix.rust_target }}
+          rustflags: ""
+          cache: false
+
+      - name: Cache cargo + target (per target)
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # Linux is the only platform needing system libraries: wry/eframe link against
+      # GTK3 / WebKit2GTK / X11 / wayland / GL. Windows and macOS use their OS-native
+      # WebView frameworks (WebView2 / WKWebView) with no extra install. (Same set as ci.yml.)
+      - name: Install Linux GUI/WebView system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev \
+            libgtk-3-dev libxdo-dev libayatana-appindicator3-dev librsvg2-dev \
+            libgl1-mesa-dev libxkbcommon-dev libwayland-dev \
+            libxcursor-dev libxrandr-dev libxi-dev
+
+      - name: Package (Linux — tar.gz)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.tag }}"
+          target="${{ matrix.target }}"
+          cargo build --release --locked --target "$target"
+          name="garlemald-client-$tag-$target"
+          mkdir -p dist
+          tar -czf "dist/$name.tar.gz" -C "target/$target/release" garlemald-client
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          ls -l dist
+
+      - name: Package (macOS — universal .app, zipped)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.tag }}"
+          name="garlemald-client-$tag-${{ matrix.target }}"
+          # Pre-build BOTH slices with --locked so the (un-locked) cargo builds inside
+          # package-macos.sh are no-ops — this keeps the release reproducible (--locked)
+          # while reusing the maintained .app packaging (Info.plist version, icon,
+          # ad-hoc signature, lipo into a universal binary).
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+          scripts/package-macos.sh --universal
+          mkdir -p dist
+          # ditto is the macOS-idiomatic way to zip a .app (preserves the bundle,
+          # symlinks, and the ad-hoc code signature).
+          ditto -c -k --keepParent "target/macos-app/Garlemald Client.app" "dist/$name.zip"
+          (cd dist && shasum -a 256 "$name.zip" > "$name.zip.sha256")
+          ls -l dist
+          echo "universal archs: $(lipo -archs 'target/macos-app/Garlemald Client.app/Contents/MacOS/garlemald-client')"
+
+      - name: Package (Windows — .exe, zipped)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = "${{ steps.tag.outputs.tag }}"
+          $target = "${{ matrix.target }}"
+          cargo build --release --locked --target $target
+          $name = "garlemald-client-$tag-$target"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          # winresource (build.rs) has already embedded the icon + version into the .exe.
+          Compress-Archive -Path "target\$target\release\garlemald-client.exe" -DestinationPath "dist\$name.zip" -Force
+          # Match the `<hash>  <file>` shape (lowercase, two spaces) so `sha256sum -c` works.
+          $h = (Get-FileHash "dist\$name.zip" -Algorithm SHA256).Hash.ToLower()
+          # LF-only, no BOM, so `sha256sum -c` on Linux accepts it.
+          [IO.File]::WriteAllText("dist\$name.zip.sha256", "$h  $name.zip`n")
+          Get-ChildItem dist
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: attach to release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Attach assets to the GitHub Release (idempotent)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.tag }}"
+          echo "Assets to attach:"; ls -l dist
+          # release.yml (#8) usually created the (notes-only) release already; create if
+          # missing (e.g. a workflow_dispatch rebuild). --verify-tag refuses to fabricate
+          # a tag; the trailing `view` tolerates a create that lost a rare race.
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "$tag" --generate-notes --verify-tag \
+            || gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1
+          # --clobber replaces same-named assets so re-runs are idempotent.
+          gh release upload "$tag" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          echo "Attached $(ls dist | wc -l) files to release $tag"
+
+      - name: Note the unsigned macOS build in the release body (idempotent)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.tag }}"
+          marker="macOS build is ad-hoc signed"
+          body="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json body -q .body 2>/dev/null || echo '')"
+          if ! printf '%s' "$body" | grep -qF "$marker"; then
+            note=$'\n\n---\n> **macOS:** the `.app` is **ad-hoc signed** (the macOS build is ad-hoc signed, i.e. unsigned for distribution). Gatekeeper will warn on first launch — right-click → Open, or run `xattr -dr com.apple.quarantine "Garlemald Client.app"`. Code signing / notarization is a planned follow-up.'
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes "${body}${note}"
+            echo "Appended the unsigned-macOS note to $tag."
+          else
+            echo "Unsigned-macOS note already present on $tag."
+          fi
