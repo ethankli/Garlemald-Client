@@ -4,8 +4,6 @@ name: CI
 # Windows / macOS / Linux platforms the launcher targets, so no merge lands without
 # a green cross-platform build + passing tests. See issue #9.
 on:
-  push:
-    branches: ['**']
   pull_request:
     branches: ['**']
 
