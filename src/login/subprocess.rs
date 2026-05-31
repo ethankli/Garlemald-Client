@@ -25,7 +25,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 use super::webview::{CANCEL_SENTINEL, ERROR_PREFIX, SESSION_PREFIX};
 
@@ -75,9 +75,8 @@ impl LoginTask {
             .name("garlemald-login-reader".into())
             .spawn(move || {
                 let reader = BufReader::new(stdout);
-                let mut outcome = LoginOutcome::Error(
-                    "login window exited without reporting an outcome".into(),
-                );
+                let mut outcome =
+                    LoginOutcome::Error("login window exited without reporting an outcome".into());
                 for line_result in reader.lines() {
                     let line = match line_result {
                         Ok(l) => l,

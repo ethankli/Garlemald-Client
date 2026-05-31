@@ -31,4 +31,4 @@ mod subprocess;
 mod webview;
 
 pub use subprocess::{LoginOutcome, LoginTask};
-pub use webview::{run_webview, CANCEL_SENTINEL, ERROR_PREFIX, SESSION_PREFIX};
+pub use webview::{CANCEL_SENTINEL, ERROR_PREFIX, SESSION_PREFIX, run_webview};

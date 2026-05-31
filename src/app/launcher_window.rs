@@ -25,13 +25,13 @@ use eframe::egui;
 use crate::app::developer_window::{DeveloperModal, DeveloperOutcome, VERBOSE_WINE_DEBUG};
 use crate::app::patcher_window::PatcherScreen;
 use crate::app::settings_window::{SettingsModal, SettingsOutcome};
-use crate::config::{bundled_config_path, data_dir, preferences_file_path, Preferences};
+use crate::config::{Preferences, bundled_config_path, data_dir, preferences_file_path};
 use crate::launcher::GameLaunchRequest;
 use crate::login::{LoginOutcome, LoginTask};
+use crate::patcher::PatchSource;
 use crate::patcher::check_game_version;
 use crate::patcher::manifest::total_bytes;
-use crate::patcher::PatchSource;
-use crate::platform::{current as current_platform, Platform};
+use crate::platform::{Platform, current as current_platform};
 use crate::servers::ServerDefinitions;
 use crate::version::{APP_NAME, APP_VERSION, FFXIV_GAME_VERSION};
 
@@ -330,9 +330,7 @@ impl LauncherApp {
             enable_winsock_proxy: self.prefs.developer.enable_winsock_tracing,
         };
         match crate::launcher::launch_game(&request) {
-            Ok(()) => self.set_info(format!(
-                "Launched ffxivgame.exe against {server_address}."
-            )),
+            Ok(()) => self.set_info(format!("Launched ffxivgame.exe against {server_address}.")),
             Err(e) => self.set_error(format!("Failed to launch game: {e}")),
         }
     }
@@ -380,8 +378,7 @@ impl LauncherApp {
             ui.label(format!("Version {APP_VERSION}"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Developer Settings…").clicked() {
-                    self.developer_modal =
-                        Some(DeveloperModal::new(&self.prefs.developer));
+                    self.developer_modal = Some(DeveloperModal::new(&self.prefs.developer));
                 }
                 if ui.button("Game Settings…").clicked() {
                     let current = self.prefs.launcher.game_location.clone();
@@ -429,7 +426,10 @@ impl LauncherApp {
         if let Some(path) = self.resolved_game_location() {
             let up_to_date = check_game_version(&path);
             let (label, color) = if up_to_date {
-                ("game.ver matches expected version", egui::Color32::LIGHT_GREEN)
+                (
+                    "game.ver matches expected version",
+                    egui::Color32::LIGHT_GREEN,
+                )
             } else {
                 (
                     "game.ver missing or outdated — use Check for Updates",

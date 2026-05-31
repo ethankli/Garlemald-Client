@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 use crate::version::{FFXIV_BOOT_VERSION, FFXIV_GAME_VERSION};
 
@@ -42,7 +42,9 @@ impl PatchPlan {
             paths.push(download_dir.join(entry.path));
         }
         paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
-        Ok(Self { patches_in_order: paths })
+        Ok(Self {
+            patches_in_order: paths,
+        })
     }
 
     /// Builds a plan from a user-chosen local directory by scanning
@@ -69,7 +71,9 @@ impl PatchPlan {
             ));
         }
         paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
-        Ok(Self { patches_in_order: paths })
+        Ok(Self {
+            patches_in_order: paths,
+        })
     }
 }
 
@@ -100,12 +104,11 @@ fn index_patches_by_leaf(source_dir: &Path) -> Result<HashMap<String, PathBuf>> 
     let mut out = HashMap::new();
     let mut stack = vec![source_dir.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let entries = fs::read_dir(&dir)
-            .with_context(|| format!("reading {}", dir.display()))?;
+        let entries = fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))?;
         for entry in entries {
-            let entry = entry
-                .with_context(|| format!("iterating {}", dir.display()))?;
-            let ty = entry.file_type()
+            let entry = entry.with_context(|| format!("iterating {}", dir.display()))?;
+            let ty = entry
+                .file_type()
                 .with_context(|| format!("stat {}", entry.path().display()))?;
             if ty.is_dir() {
                 stack.push(entry.path());
@@ -137,10 +140,8 @@ pub fn check_game_version(game_location: &Path) -> bool {
 pub fn write_version_files(game_location: &Path) -> Result<()> {
     let boot = game_location.join("boot.ver");
     let game = game_location.join("game.ver");
-    fs::write(&boot, FFXIV_BOOT_VERSION)
-        .with_context(|| format!("writing {}", boot.display()))?;
-    fs::write(&game, FFXIV_GAME_VERSION)
-        .with_context(|| format!("writing {}", game.display()))?;
+    fs::write(&boot, FFXIV_BOOT_VERSION).with_context(|| format!("writing {}", boot.display()))?;
+    fs::write(&game, FFXIV_GAME_VERSION).with_context(|| format!("writing {}", game.display()))?;
     Ok(())
 }
 

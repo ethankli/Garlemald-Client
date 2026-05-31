@@ -77,7 +77,7 @@ pub fn run_webview(login_url: &str) -> Result<()> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-fn build_webview<'a>(window: &'a tao::window::Window, login_url: &str) -> Result<wry::WebView> {
+fn build_webview(window: &tao::window::Window, login_url: &str) -> Result<wry::WebView> {
     WebViewBuilder::new(window)
         .with_url(login_url)
         .with_navigation_handler(navigation_handler)
@@ -86,7 +86,7 @@ fn build_webview<'a>(window: &'a tao::window::Window, login_url: &str) -> Result
 }
 
 #[cfg(target_os = "macos")]
-fn build_webview<'a>(window: &'a tao::window::Window, login_url: &str) -> Result<wry::WebView> {
+fn build_webview(window: &tao::window::Window, login_url: &str) -> Result<wry::WebView> {
     // On macOS wry 0.44 defaults to a child NSView — that is fine for us
     // since the window has no other content.
     WebViewBuilder::new(window)

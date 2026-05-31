@@ -37,7 +37,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 use crate::config;
 
@@ -46,21 +46,21 @@ use crate::config;
 /// Wine's debug syntax is `[class][+/-]channel`. Without a class prefix,
 /// `-fixme` / `+err` treat those as *channel* names (which don't exist), so
 /// the obvious-looking `-fixme,+err` is a silent no-op. Correct form:
-///   * `fixme-all` — silence fixme for every channel
-///   * `err+all`   — keep err class enabled (it's on by default, but explicit
-///                    makes our intent clear)
-///   * `+seh`      — all classes for the seh channel, so crashes and unhandled
-///                    exceptions still surface
-///   * `+debugstr` — log every `OutputDebugStringA/W` call. Pairs with the
-///                    `assert_log_patch` PE patch, which redirects the
-///                    game's silent assert handler into `OutputDebugStringA`
-///                    so the assertion message lands in the wine log right
-///                    before the trap fires.
-///   * `warn+d3d`  — keep the wined3d WARN level on (otherwise silent),
-///                    so the rejection reason for failed `StretchRect` /
-///                    `Present` / surface-creation calls is visible. Wine's
-///                    WARN class is suppressed by default; the cinematic
-///                    crash trace lives here.
+/// * `fixme-all` — silence fixme for every channel
+/// * `err+all` — keep err class enabled (it's on by default, but explicit
+///   makes our intent clear)
+/// * `+seh` — all classes for the seh channel, so crashes and unhandled
+///   exceptions still surface
+/// * `+debugstr` — log every `OutputDebugStringA/W` call. Pairs with the
+///   `assert_log_patch` PE patch, which redirects the
+///   game's silent assert handler into `OutputDebugStringA`
+///   so the assertion message lands in the wine log right
+///   before the trap fires.
+/// * `warn+d3d` — keep the wined3d WARN level on (otherwise silent),
+///   so the rejection reason for failed `StretchRect` /
+///   `Present` / surface-creation calls is visible. Wine's
+///   WARN class is suppressed by default; the cinematic
+///   crash trace lives here.
 ///
 /// Callers that want more verbosity (e.g. `+relay,+module,+loaddll`) can set
 /// `WINEDEBUG` in the environment; we only fill this in as a default.
@@ -84,8 +84,7 @@ pub fn monotonic_ms_since_boot() -> u32 {
     if rc != 0 {
         return 0;
     }
-    let ms = (ts.tv_sec as u64).wrapping_mul(1_000)
-        + (ts.tv_nsec as u64 / 1_000_000);
+    let ms = (ts.tv_sec as u64).wrapping_mul(1_000) + (ts.tv_nsec as u64 / 1_000_000);
     ms as u32
 }
 
@@ -97,6 +96,7 @@ pub struct WineRuntime {
     #[allow(dead_code)]
     pub wineserver_bin: PathBuf,
     /// Additional `DYLD_FALLBACK_LIBRARY_PATH` entries (macOS only).
+    #[allow(dead_code)] // read only in the macOS cfg block; dead on Linux.
     pub dyld_fallback_paths: Vec<PathBuf>,
     /// `gstreamer-1.0` plugin directory shipped in the runtime bundle. When
     /// `Some`, gets exported as `GST_PLUGIN_PATH` / `GST_PLUGIN_SYSTEM_PATH`
@@ -240,7 +240,10 @@ pub fn launch_ffxiv_game(
         log::info!("WINEDLLOVERRIDES={}", ovr);
     }
 
-    log::info!("launching ffxivgame via wine; output → {}", log_path.display());
+    log::info!(
+        "launching ffxivgame via wine; output → {}",
+        log_path.display()
+    );
     let status = cmd.status().context("launching ffxivgame.exe via wine")?;
 
     writeln!(&log_file, "\n=== exit: {status:?} ===").ok();
@@ -304,11 +307,7 @@ fn emit_log_tail(log_path: &Path) {
 /// remove both files so the stock loader path resumes. Errors here
 /// don't abort the launch: if the proxy can't be deployed, the user
 /// gets plain networking and a log line explaining why.
-fn apply_winsock_proxy(
-    _runtime: &WineRuntime,
-    game_dir: &Path,
-    enable: bool,
-) -> Result<()> {
+fn apply_winsock_proxy(_runtime: &WineRuntime, game_dir: &Path, enable: bool) -> Result<()> {
     let proxy_dest = game_dir.join("ws2_32.dll");
     // Earlier versions of this launcher also deployed a renamed copy
     // of Wine's real ws2_32 as `ws2_32_real.dll` and used PE `FORWARD`
@@ -324,15 +323,17 @@ fn apply_winsock_proxy(
 
     if !enable {
         for p in [&proxy_dest, &legacy_real_copy] {
-            if p.exists() && let Err(e) = std::fs::remove_file(p) {
+            if p.exists()
+                && let Err(e) = std::fs::remove_file(p)
+            {
                 log::warn!("failed to remove {}: {e}", p.display());
             }
         }
         return Ok(());
     }
 
-    let built_proxy = workspace_ws2_32_proxy_dll()
-        .context("locating the built ws2_32 proxy DLL")?;
+    let built_proxy =
+        workspace_ws2_32_proxy_dll().context("locating the built ws2_32 proxy DLL")?;
     if !built_proxy.exists() {
         return Err(anyhow!(
             "winsock tracing is on but the proxy DLL is missing at {}.\n\
@@ -352,10 +353,7 @@ fn apply_winsock_proxy(
             proxy_dest.display()
         )
     })?;
-    log::info!(
-        "ws2_32 proxy installed: {}",
-        proxy_dest.display(),
-    );
+    log::info!("ws2_32 proxy installed: {}", proxy_dest.display(),);
     log::info!(
         "winsock traces will land at {}",
         game_dir.join("ws2_32-trace.log").display()
@@ -388,12 +386,7 @@ pub fn copy_exe_for_patching(source_exe: &Path, dest_exe: &Path) -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating dir {}", parent.display()))?;
     }
-    std::fs::copy(source_exe, dest_exe).with_context(|| {
-        format!(
-            "copying {} -> {}",
-            source_exe.display(),
-            dest_exe.display()
-        )
-    })?;
+    std::fs::copy(source_exe, dest_exe)
+        .with_context(|| format!("copying {} -> {}", source_exe.display(), dest_exe.display()))?;
     Ok(())
 }

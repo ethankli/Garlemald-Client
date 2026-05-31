@@ -19,10 +19,10 @@
 mod game_launch;
 mod pe_patch;
 
-pub use game_launch::{launch_game, GameLaunchRequest, PatchSpec};
+pub use game_launch::{GameLaunchRequest, PatchSpec, launch_game};
 pub use pe_patch::{
+    ASSERT_LOG_PATCH_RVA, ENCRYPTION_TIME_PATCH_RVA, LOBBY_HOST_NAME_RVA,
+    LOBBY_HOST_NAME_SLOT_SIZE, NULL_MEMBER8_WRITE_NOP_RVA, NULL_THIS_GUARD_PATCH_RVA, PePatch,
     apply_patches_on_disk, assert_log_patch, encryption_time_patch, lobby_host_patch,
-    null_member8_write_nop_patch, null_this_guard_patch, PePatch, ASSERT_LOG_PATCH_RVA,
-    ENCRYPTION_TIME_PATCH_RVA, LOBBY_HOST_NAME_RVA, LOBBY_HOST_NAME_SLOT_SIZE,
-    NULL_MEMBER8_WRITE_NOP_RVA, NULL_THIS_GUARD_PATCH_RVA,
+    null_member8_write_nop_patch, null_this_guard_patch,
 };

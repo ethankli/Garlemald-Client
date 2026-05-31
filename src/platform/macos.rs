@@ -37,20 +37,19 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 use crate::config;
 use crate::crypto;
 use crate::launcher::{
-    apply_patches_on_disk, assert_log_patch, encryption_time_patch, lobby_host_patch,
-    null_member8_write_nop_patch, null_this_guard_patch,
-    GameLaunchRequest,
-};
-use crate::platform::wine::{
-    copy_exe_for_patching, ensure_prefix_initialized, launch_ffxiv_game, monotonic_ms_since_boot, WineRuntime,
-    PREFIX_FFXIV_SUBPATH,
+    GameLaunchRequest, apply_patches_on_disk, assert_log_patch, encryption_time_patch,
+    lobby_host_patch, null_member8_write_nop_patch, null_this_guard_patch,
 };
 use crate::platform::Platform;
+use crate::platform::wine::{
+    PREFIX_FFXIV_SUBPATH, WineRuntime, copy_exe_for_patching, ensure_prefix_initialized,
+    launch_ffxiv_game, monotonic_ms_since_boot,
+};
 
 const WRAPPER_VERSION: &str = "1.0.11";
 const WRAPPER_URL: &str =
@@ -60,6 +59,12 @@ const ENGINE_URL: &str =
     "https://github.com/Sikarugir-App/Engines/releases/download/v1.0/WS12WineCX24.0.7_7.tar.xz";
 
 pub struct MacosPlatform;
+
+impl Default for MacosPlatform {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl MacosPlatform {
     pub fn new() -> Self {
@@ -95,9 +100,8 @@ impl MacosPlatform {
     /// can derive one; falls back to the managed prefix otherwise.
     fn runtime_for_game_dir(game_dir: &Path) -> Result<WineRuntime> {
         let prefix = derive_prefix_from_game_location(game_dir)
-            .map(|p| {
+            .inspect(|p| {
                 log::info!("using WINEPREFIX derived from game dir: {}", p.display());
-                p
             })
             .unwrap_or_else(|| Self::managed_prefix_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let runtime_root = Self::runtime_root()?;
@@ -118,7 +122,8 @@ impl MacosPlatform {
                 PathBuf::from("/usr/lib"),
             ],
             gst_plugin_path: Some(
-                runtime_root.join("Frameworks/GStreamer.framework/Versions/Current/lib/gstreamer-1.0"),
+                runtime_root
+                    .join("Frameworks/GStreamer.framework/Versions/Current/lib/gstreamer-1.0"),
             ),
         })
     }
@@ -232,9 +237,9 @@ pub fn ensure_runtime_downloaded() -> Result<()> {
         let archive = tmp.path().join("wrapper.tar.xz");
         download_to(WRAPPER_URL, &archive)?;
         extract_tar_xz(&archive, tmp.path())?;
-        let src = tmp
-            .path()
-            .join(format!("Template-{WRAPPER_VERSION}.app/Contents/Frameworks"));
+        let src = tmp.path().join(format!(
+            "Template-{WRAPPER_VERSION}.app/Contents/Frameworks"
+        ));
         if !src.exists() {
             return Err(anyhow!(
                 "wrapper archive didn't contain expected path {}",
@@ -328,8 +333,7 @@ fn extract_tar_xz(archive: &Path, dst: &Path) -> Result<()> {
 /// wswine.bundle, which use version-suffixed dylibs linked into unversioned
 /// names). Does *not* preserve file modes beyond the std defaults.
 fn copy_dir_preserving_symlinks(src: &Path, dst: &Path) -> Result<()> {
-    fs::create_dir_all(dst)
-        .with_context(|| format!("creating dir {}", dst.display()))?;
+    fs::create_dir_all(dst).with_context(|| format!("creating dir {}", dst.display()))?;
     for entry in fs::read_dir(src).with_context(|| format!("reading {}", src.display()))? {
         let entry = entry?;
         let ty = entry.file_type()?;
@@ -350,8 +354,9 @@ fn copy_dir_preserving_symlinks(src: &Path, dst: &Path) -> Result<()> {
         } else if ty.is_dir() {
             copy_dir_preserving_symlinks(&source, &destination)?;
         } else {
-            fs::copy(&source, &destination)
-                .with_context(|| format!("copying {} -> {}", source.display(), destination.display()))?;
+            fs::copy(&source, &destination).with_context(|| {
+                format!("copying {} -> {}", source.display(), destination.display())
+            })?;
         }
     }
     Ok(())
@@ -363,7 +368,9 @@ mod tests {
 
     #[test]
     fn derives_prefix_from_nested_game_dir() {
-        let game = PathBuf::from("/Users/me/Library/Application Support/garlemald-client/prefix/drive_c/Program Files (x86)/SquareEnix/FINAL FANTASY XIV");
+        let game = PathBuf::from(
+            "/Users/me/Library/Application Support/garlemald-client/prefix/drive_c/Program Files (x86)/SquareEnix/FINAL FANTASY XIV",
+        );
         let prefix = derive_prefix_from_game_location(&game);
         assert_eq!(
             prefix,

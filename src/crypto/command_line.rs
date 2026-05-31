@@ -16,9 +16,9 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-use anyhow::{anyhow, Result};
-use base64::engine::general_purpose::STANDARD as BASE64;
+use anyhow::{Result, anyhow};
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use blowfish::BlowfishLE;
 use cipher::generic_array::GenericArray;
 use cipher::{BlockEncrypt, KeyInit};

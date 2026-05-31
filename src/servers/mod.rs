@@ -18,4 +18,4 @@
 
 mod definitions;
 
-pub use definitions::{ServerDefinition, ServerDefinitions, DEFAULT_SERVERS_TOML};
+pub use definitions::{DEFAULT_SERVERS_TOML, ServerDefinition, ServerDefinitions};

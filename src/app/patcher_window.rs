@@ -21,15 +21,15 @@
 //! worker runs on a background thread; this module only polls shared state.
 
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
 use eframe::egui;
 
 use crate::patcher::manifest::PATCH_MANIFEST;
-use crate::patcher::{start_patcher_worker, PatchSource, PatcherShared, Phase};
+use crate::patcher::{PatchSource, PatcherShared, Phase, start_patcher_worker};
 
 pub struct PatcherScreen {
     shared: Arc<PatcherShared>,
@@ -82,10 +82,7 @@ impl PatcherScreen {
     }
 
     fn total_downloaded_bytes(&self) -> u64 {
-        let completed = self
-            .shared
-            .previous_completed_bytes
-            .load(Ordering::Acquire);
+        let completed = self.shared.previous_completed_bytes.load(Ordering::Acquire);
         let current = self.shared.download.bytes();
         completed + current
     }
@@ -180,9 +177,7 @@ impl PatcherScreen {
             Phase::Starting | Phase::Downloading => {
                 "Patcher waiting for download to complete…".to_string()
             }
-            Phase::Validating => {
-                "Patcher waiting for local patches to be validated…".to_string()
-            }
+            Phase::Validating => "Patcher waiting for local patches to be validated…".to_string(),
             Phase::Patching => PATCH_MANIFEST
                 .get(idx)
                 .map(|entry| format!("Applying {}…", leaf_name(entry.path)))

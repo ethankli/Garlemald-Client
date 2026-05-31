@@ -55,8 +55,7 @@ impl ServerDefinitions {
     }
 
     pub fn parse(toml_text: &str) -> Result<Self> {
-        let parsed: ServersFile =
-            toml::from_str(toml_text).context("parsing servers TOML")?;
+        let parsed: ServersFile = toml::from_str(toml_text).context("parsing servers TOML")?;
         let mut servers: BTreeMap<String, ServerDefinition> = BTreeMap::new();
         for server in parsed.servers {
             if !server.name.is_empty() {

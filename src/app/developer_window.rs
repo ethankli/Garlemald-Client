@@ -37,8 +37,7 @@ use crate::config::DeveloperPreferences;
 /// call but slowed the 1.23b client so badly that character creation
 /// wouldn't complete; keep it off unless you specifically need a full
 /// call trace and are willing to wait several minutes per UI step.
-pub const VERBOSE_WINE_DEBUG: &str =
-    "err+all,+seh,+tid,+loaddll,+module,+winsock,+ws2_32";
+pub const VERBOSE_WINE_DEBUG: &str = "err+all,+seh,+tid,+loaddll,+module,+winsock,+ws2_32";
 
 #[derive(Debug, Clone)]
 pub enum DeveloperOutcome {

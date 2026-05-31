@@ -22,16 +22,16 @@
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 
 use crc32fast::Hasher as Crc32Hasher;
 use parking_lot::Mutex;
 
 use super::downloader::{DownloadProgress, DownloadResult, Downloader};
-use super::manifest::{total_bytes, PatchEntry, PATCH_MANIFEST, PATCH_URL_BASE};
-use super::process::{write_version_files, PatchPlan};
+use super::manifest::{PATCH_MANIFEST, PATCH_URL_BASE, PatchEntry, total_bytes};
+use super::process::{PatchPlan, write_version_files};
 
 /// Where the worker should get the patch files from. `Download` fetches the
 /// manifest from the S3 bucket; `Local` trusts a pre-existing directory
@@ -120,10 +120,7 @@ impl PatcherShared {
     }
 
     pub fn is_terminal(&self) -> bool {
-        matches!(
-            self.phase(),
-            Phase::Done | Phase::Error | Phase::Cancelled
-        )
+        matches!(self.phase(), Phase::Done | Phase::Error | Phase::Cancelled)
     }
 
     fn set_phase(&self, phase: Phase) {
@@ -156,10 +153,12 @@ pub fn start_patcher_worker(
 
 fn run_patcher(shared: Arc<PatcherShared>, game_dir: PathBuf, source: PatchSource) {
     let plan = match source {
-        PatchSource::Download { download_dir } => match run_download_phase(&shared, &download_dir) {
-            Some(plan) => plan,
-            None => return,
-        },
+        PatchSource::Download { download_dir } => {
+            match run_download_phase(&shared, &download_dir) {
+                Some(plan) => plan,
+                None => return,
+            }
+        }
         PatchSource::Local { source_dir } => match run_validate_phase(&shared, &source_dir) {
             Some(plan) => plan,
             None => return,
@@ -303,10 +302,7 @@ fn run_validate_phase(shared: &Arc<PatcherShared>, source_dir: &Path) -> Option<
                 return None;
             }
             Err(ValidateError::Crc32Mismatch) => {
-                shared.set_error(format!(
-                    "Local patch {} failed CRC32 check",
-                    path.display(),
-                ));
+                shared.set_error(format!("Local patch {} failed CRC32 check", path.display(),));
                 return None;
             }
             Err(ValidateError::Io(e)) => {
