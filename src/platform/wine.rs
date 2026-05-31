@@ -21,7 +21,7 @@
 //! A managed "runtime" looks like:
 //!
 //! ```text
-//! <data_dir>/garlemald-client/
+//! <data_dir>/    (per-app dir, e.g. ~/Library/Application Support/me.stegall.garlemald-client/ on macOS)
 //! ├── prefix/                              # WINEPREFIX
 //! │   └── drive_c/Program Files (x86)/SquareEnix/FINAL FANTASY XIV/
 //! └── runtime/                             # macOS only

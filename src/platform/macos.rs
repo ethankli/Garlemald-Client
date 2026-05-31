@@ -19,7 +19,7 @@
 //! macOS (Apple Silicon) platform backend.
 //!
 //! Manages its own Wine prefix and runtime under
-//! `~/Library/Application Support/garlemald-client/`, downloading the
+//! `~/Library/Application Support/me.stegall.garlemald-client/`, downloading the
 //! Sikarugir CrossOver engine + Frameworks on first launch. Interoperates
 //! with externally-managed prefixes (e.g. the sibling
 //! `xiv1point0-apple-silicon-installer`) by deriving `WINEPREFIX` from the
