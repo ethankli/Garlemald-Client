@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Hardened Runtime entitlements for the notarized Developer ID build.
+      The embedded login WebView (wry → WKWebView → JavaScriptCore) JIT-compiles
+      JS; without allow-jit it aborts under the Hardened Runtime on Apple Silicon.
+      allow-unsigned-executable-memory is the usual JSC companion — if the signed
+      webview launches cleanly with allow-jit alone, this one can be removed.
+
+      Deliberately NOT included:
+        * com.apple.security.cs.disable-library-validation — the launcher loads no
+          third-party dylibs in-process (it SPAWNS the Wine runtime as a subprocess),
+          so library validation can stay on. Adding it would needlessly weaken the
+          signature and is a notarization red flag.
+        * com.apple.security.network.* — those are App Sandbox keys; this is a
+          non-sandboxed direct-download app, which already has network access.
+          (Plain-HTTP login is handled by NSAppTransportSecurity in Info.plist.)
+      The eframe/egui + winit + glow (OpenGL) rendering path needs no entitlements.
+    -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+</dict>
+</plist>

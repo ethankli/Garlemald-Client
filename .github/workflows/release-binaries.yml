@@ -95,27 +95,135 @@ jobs:
           (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
           ls -l dist
 
-      - name: Package (macOS — universal .app, zipped)
+      # ----- macOS: universal .app, optionally Developer ID-signed + notarized -----
+      # Signing + notarization auto-activate when BOTH the cert and the App Store
+      # Connect API key secrets are present; otherwise the leg falls back to today's
+      # ad-hoc (unsigned) .app. See docs/RELEASING.md "macOS code signing".
+      - name: Detect macOS signing secrets
+        id: macsign
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          ASC_KEY: ${{ secrets.ASC_API_KEY_P8_BASE64 }}
+        run: |
+          if [ -n "${CERT_P12:-}" ] && [ -n "${ASC_KEY:-}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "Developer ID signing + notarization: ENABLED (secrets present)."
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::macOS signing secrets absent — building an ad-hoc (unsigned) .app. Gatekeeper will warn on download."
+          fi
+
+      - name: Import Developer ID cert into a temporary keychain
+        if: runner.os == 'macOS' && steps.macsign.outputs.enabled == 'true'
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          CERT_PWD: ${{ secrets.MACOS_CERT_PWD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CERT_PWD:-}" ]; then
+            echo "::error::MACOS_CERT_PWD is empty. macOS 'security import' cannot import a passwordless .p12 (it fails MAC verification even with -P \"\"). Re-export the Developer ID cert from Keychain Access WITH an export password and set MACOS_CERT_PWD."
+            exit 1
+          fi
+          KC="$RUNNER_TEMP/build.keychain-db"
+          # Throwaway keychain password — generated per run (the keychain is created,
+          # used, and deleted within this job), so it need not be a stored secret.
+          KEYCHAIN_PWD="$(openssl rand -base64 24)"
+          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PWD" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"   # no auto-lock mid-run
+          security unlock-keychain -p "$KEYCHAIN_PWD" "$KC"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$CERT_PWD" -T /usr/bin/codesign
+          # Let codesign use the key non-interactively.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PWD" "$KC" >/dev/null
+          # Put our keychain first in the user search list (preserving the existing
+          # ones) so codesign finds the identity. Parse line-by-line so a keychain
+          # path containing whitespace can't word-split.
+          existing=()
+          while IFS= read -r kc; do
+            kc="$(printf '%s' "$kc" | sed -E 's/^[[:space:]]*"?//; s/"?[[:space:]]*$//')"
+            [ -n "$kc" ] && existing+=("$kc")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$KC" "${existing[@]}"
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      - name: Build + package the universal .app
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          SIGN_ENABLED: ${{ steps.macsign.outputs.enabled }}
+          SIGN_IDENTITY: ${{ secrets.MACOS_CERT_IDENTITY }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.tag }}"
+          name="garlemald-client-$tag-${{ matrix.target }}"
+          # Pre-build BOTH slices with --locked so the (un-locked) cargo builds inside
+          # package-macos.sh are no-ops — keeps the release reproducible (--locked) while
+          # reusing the maintained .app packaging (Info.plist version, icon, lipo, signing).
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+          if [ "${SIGN_ENABLED:-false}" = "true" ]; then
+            # Developer ID-signed (hardened runtime + entitlements + timestamp via the script).
+            scripts/package-macos.sh --universal --sign "$SIGN_IDENTITY"
+          else
+            scripts/package-macos.sh --universal   # ad-hoc (unsigned) fallback
+          fi
+          mkdir -p dist
+          # ditto is the macOS-idiomatic way to zip a .app (preserves the bundle,
+          # symlinks, and the code signature).
+          ditto -c -k --keepParent "target/macos-app/Garlemald Client.app" "dist/$name.zip"
+          echo "universal archs: $(lipo -archs 'target/macos-app/Garlemald Client.app/Contents/MacOS/garlemald-client')"
+
+      - name: Notarize + staple the .app
+        if: runner.os == 'macOS' && steps.macsign.outputs.enabled == 'true'
+        shell: bash
+        env:
+          ASC_KEY: ${{ secrets.ASC_API_KEY_P8_BASE64 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.tag }}"
+          name="garlemald-client-$tag-${{ matrix.target }}"
+          app="target/macos-app/Garlemald Client.app"
+          key="$RUNNER_TEMP/asc_key.p8"
+          echo "$ASC_KEY" | base64 --decode > "$key"
+          # Submit the (already-zipped) bundle and block on Apple's verdict.
+          rc=0
+          out="$(xcrun notarytool submit "dist/$name.zip" --key "$key" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --wait 2>&1)" || rc=$?
+          echo "$out"
+          if [ "$rc" != 0 ] || ! printf '%s' "$out" | grep -qi 'status: Accepted'; then
+            sid="$(printf '%s\n' "$out" | awk -F': *' '/^[[:space:]]*id:/{print $2; exit}')"
+            [ -n "$sid" ] && xcrun notarytool log "$sid" --key "$key" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" || true
+            echo "::error::Notarization was not Accepted for $name (see the log above)."
+            rm -f "$key"; exit 1
+          fi
+          # Staple the ticket so the app validates offline, then RE-ZIP (the
+          # pre-notarization zip has no ticket) and re-checksum downstream.
+          xcrun stapler staple "$app"
+          xcrun stapler validate "$app"
+          rm -f "dist/$name.zip"
+          ditto -c -k --keepParent "$app" "dist/$name.zip"
+          # Final Gatekeeper gate: must accept as a Notarized Developer ID app.
+          spctl -a -vvv -t exec "$app"
+          rm -f "$key"
+
+      - name: Checksum the macOS artifact
         if: runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
           tag="${{ steps.tag.outputs.tag }}"
           name="garlemald-client-$tag-${{ matrix.target }}"
-          # Pre-build BOTH slices with --locked so the (un-locked) cargo builds inside
-          # package-macos.sh are no-ops — this keeps the release reproducible (--locked)
-          # while reusing the maintained .app packaging (Info.plist version, icon,
-          # ad-hoc signature, lipo into a universal binary).
-          cargo build --release --locked --target aarch64-apple-darwin
-          cargo build --release --locked --target x86_64-apple-darwin
-          scripts/package-macos.sh --universal
-          mkdir -p dist
-          # ditto is the macOS-idiomatic way to zip a .app (preserves the bundle,
-          # symlinks, and the ad-hoc code signature).
-          ditto -c -k --keepParent "target/macos-app/Garlemald Client.app" "dist/$name.zip"
           (cd dist && shasum -a 256 "$name.zip" > "$name.zip.sha256")
           ls -l dist
-          echo "universal archs: $(lipo -archs 'target/macos-app/Garlemald Client.app/Contents/MacOS/garlemald-client')"
+
+      - name: Clean up the signing keychain
+        if: always() && runner.os == 'macOS' && steps.macsign.outputs.enabled == 'true'
+        run: |
+          security delete-keychain "$RUNNER_TEMP/build.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/asc_key.p8" 2>/dev/null || true
 
       - name: Package (Windows — .exe, zipped)
         if: runner.os == 'Windows'
@@ -176,13 +284,31 @@ jobs:
           gh release upload "$tag" dist/* --repo "$GITHUB_REPOSITORY" --clobber
           echo "Attached $(ls dist | wc -l) files to release $tag"
 
+      - name: Detect macOS signing (to phrase the release note)
+        id: releasesign
+        shell: bash
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          ASC_KEY: ${{ secrets.ASC_API_KEY_P8_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -n "${CERT_P12:-}" ] && [ -n "${ASC_KEY:-}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Only when the macOS build is UNSIGNED (signing secrets absent): tell users
+      # about Gatekeeper. Once signing + notarization is on, the app is
+      # Gatekeeper-clean and this note is skipped.
       - name: Note the unsigned macOS build in the release body (idempotent)
+        if: steps.releasesign.outputs.enabled != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           tag="${{ steps.tag.outputs.tag }}"
-          marker="macOS build is ad-hoc signed"
+          marker="ad-hoc signed"
           # Read the current body. If the read fails or the body is empty, SKIP rather
           # than risk clobbering the generated notes with only the appended fragment.
           if ! body="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json body -q .body 2>/dev/null)" || [ -z "$body" ]; then
@@ -190,7 +316,7 @@ jobs:
           elif printf '%s' "$body" | grep -qF "$marker"; then
             echo "Unsigned-macOS note already present on $tag."
           else
-            note=$'\n\n---\n> **macOS:** the `.app` is **ad-hoc signed** (the macOS build is ad-hoc signed, i.e. unsigned for distribution). Gatekeeper will warn on first launch — right-click → Open, or run `xattr -dr com.apple.quarantine "Garlemald Client.app"`. Code signing / notarization is a planned follow-up.'
+            note=$'\n\n---\n> **macOS:** the `.app` is **ad-hoc signed** (unsigned for distribution). Gatekeeper will warn on first launch — right-click → Open, or run `xattr -dr com.apple.quarantine "Garlemald Client.app"`. Signing + notarization can be enabled by adding the secrets in docs/RELEASING.md ("macOS code signing").'
             gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes "${body}${note}"
             echo "Appended the unsigned-macOS note to $tag."
           fi

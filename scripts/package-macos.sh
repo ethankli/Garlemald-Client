@@ -170,7 +170,28 @@ fi
 
 if [[ "$NO_SIGN" != "1" ]]; then
     echo "==> Codesigning (identity: $SIGN_IDENTITY)"
-    codesign --deep --force --sign "$SIGN_IDENTITY" "$APP_DIR"
+    if [[ "$SIGN_IDENTITY" == "-" ]]; then
+        # Ad-hoc (local dev / unsigned release): keeps Gatekeeper quiet for local
+        # launches. No hardened runtime / timestamp / entitlements — those require a
+        # real cert and a network round-trip and would fail ad-hoc.
+        codesign --force --sign - "$APP_DIR"
+    else
+        # Developer ID: notarization-grade. Hardened Runtime (--options runtime) and a
+        # secure timestamp are MANDATORY for notarization; the entitlements plist lets
+        # the WKWebView JIT run under the Hardened Runtime. Sign inside-out (the nested
+        # Mach-O first, then the bundle); `--deep` is deprecated and applies the runtime
+        # flag/entitlements unreliably, so it is not used.
+        ENTITLEMENTS="$PROJECT_DIR/assets/entitlements.plist"
+        if [[ ! -f "$ENTITLEMENTS" ]]; then
+            echo "error: entitlements file not found at $ENTITLEMENTS" >&2
+            exit 1
+        fi
+        codesign --force --options runtime --timestamp \
+            --entitlements "$ENTITLEMENTS" --sign "$SIGN_IDENTITY" "$MACOS_DIR/$BINARY_NAME"
+        codesign --force --options runtime --timestamp \
+            --entitlements "$ENTITLEMENTS" --sign "$SIGN_IDENTITY" "$APP_DIR"
+        codesign --verify --strict --verbose=2 "$APP_DIR"
+    fi
 fi
 
 # Print a short summary with the bundle size so the caller can eyeball it.
