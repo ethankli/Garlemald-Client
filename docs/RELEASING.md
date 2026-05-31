@@ -111,6 +111,49 @@ per-platform binary-release workflow (mirroring Garlemald-Server's
 `release-binaries.yml`) is expected to trigger on that tag push, so a skip marker
 would silently prevent those builds.
 
+## macOS code signing (Developer ID + notarization)
+
+`release-binaries.yml` builds an **ad-hoc (unsigned)** `.app` by default — Gatekeeper
+warns on first launch. To ship a Gatekeeper-clean, **Developer ID-signed and
+notarized** `.app`, add the secrets below; the workflow **auto-activates** signing +
+notarization when they are present (it gates on the cert and API-key secrets and
+otherwise falls back to ad-hoc — no workflow edit needed to switch on/off).
+
+What the signed path does: `scripts/package-macos.sh --sign` codesigns the universal
+binary and bundle with the **Hardened Runtime** (`--options runtime`), a secure
+timestamp, and `assets/entitlements.plist` (the `wry`/WKWebView JIT needs
+`com.apple.security.cs.allow-jit`); CI then `xcrun notarytool submit --wait`s the
+zip, `stapler staple`s the ticket onto the bundle, re-zips, and runs `spctl` as a
+final Gatekeeper gate.
+
+Required repository secrets (all from a **paid** Apple Developer Program account;
+you must be Account Holder/Admin). Signing requires **both** `MACOS_CERT_P12_BASE64`
+and `ASC_API_KEY_P8_BASE64`; if either is missing the build stays ad-hoc:
+
+| Secret | What it is |
+|--------|------------|
+| `MACOS_CERT_P12_BASE64` | A **Developer ID Application** cert + private key, exported as `.p12`, base64-encoded. |
+| `MACOS_CERT_PWD` | The export password set on the `.p12`. **Must be non-empty** — macOS `security import` cannot import a passwordless `.p12` (it fails MAC verification), so set an export password when you export the cert. |
+| `MACOS_CERT_IDENTITY` | The exact identity, e.g. `Developer ID Application: Your Name (TEAMID1234)`. |
+| `ASC_API_KEY_P8_BASE64` | An App Store Connect **team** API key (`.p8`), base64-encoded (downloads once). |
+| `ASC_KEY_ID` | The 10-character Key ID. |
+| `ASC_ISSUER_ID` | The Issuer ID (UUID) from App Store Connect → Users and Access → Integrations. |
+
+(The CI keychain password is generated per run inside the workflow, so it is not a secret you provide.)
+
+Keep branch protection's **"Do not allow administrators to bypass" OFF**
+(`enforce_admins: false`) — unrelated to signing, but the same precondition the
+release bot relies on.
+
+> **Runtime caveat (verify after the first signed release):** the launcher downloads
+> the Sikarugir Wine runtime and **spawns it as a subprocess** (it does not load
+> those dylibs in-process, so the notarized launcher needs no
+> `disable-library-validation`). `ureq` downloads are usually not quarantined, so the
+> spawned Wine should run under the notarized launcher — but confirm the game
+> launches on a clean Mac. If Gatekeeper blocks the Wine binary, the fix is small:
+> strip `com.apple.quarantine` (and/or ad-hoc re-sign) the runtime in
+> `src/platform/macos.rs::ensure_runtime_downloaded` after extraction.
+
 ## Seeding
 
 The sequence starts from the `v0.1.0` tag on `main`. The first merge after the
