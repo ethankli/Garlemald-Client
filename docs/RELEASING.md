@@ -134,10 +134,12 @@ and `ASC_API_KEY_P8_BASE64`; if either is missing the build stays ad-hoc:
 |--------|------------|
 | `MACOS_CERT_P12_BASE64` | A **Developer ID Application** cert + private key, exported as `.p12`, base64-encoded. |
 | `MACOS_CERT_PWD` | The export password set on the `.p12`. **Must be non-empty** — macOS `security import` cannot import a passwordless `.p12` (it fails MAC verification), so set an export password when you export the cert. |
-| `MACOS_CERT_IDENTITY` | The exact identity, e.g. `Developer ID Application: Your Name (TEAMID1234)`. |
 | `ASC_API_KEY_P8_BASE64` | An App Store Connect **team** API key (`.p8`), base64-encoded (downloads once). |
 | `ASC_KEY_ID` | The 10-character Key ID. |
 | `ASC_ISSUER_ID` | The Issuer ID (UUID) from App Store Connect → Users and Access → Integrations. |
+
+(The signing identity is derived automatically by SHA-1 hash from the imported
+cert, so there is no `MACOS_CERT_IDENTITY` secret to keep in sync.)
 
 (The CI keychain password is generated per run inside the workflow, so it is not a secret you provide.)
 
