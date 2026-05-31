@@ -86,7 +86,7 @@ fn build_webview<'a>(window: &'a tao::window::Window, login_url: &str) -> Result
 }
 
 #[cfg(target_os = "macos")]
-fn build_webview<'a>(window: &'a tao::window::Window, login_url: &str) -> Result<wry::WebView> {
+fn build_webview(window: &tao::window::Window, login_url: &str) -> Result<wry::WebView> {
     // On macOS wry 0.44 defaults to a child NSView — that is fine for us
     // since the window has no other content.
     WebViewBuilder::new(window)

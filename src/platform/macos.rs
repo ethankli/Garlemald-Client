@@ -60,6 +60,12 @@ const ENGINE_URL: &str =
 
 pub struct MacosPlatform;
 
+impl Default for MacosPlatform {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MacosPlatform {
     pub fn new() -> Self {
         Self
@@ -94,9 +100,8 @@ impl MacosPlatform {
     /// can derive one; falls back to the managed prefix otherwise.
     fn runtime_for_game_dir(game_dir: &Path) -> Result<WineRuntime> {
         let prefix = derive_prefix_from_game_location(game_dir)
-            .map(|p| {
+            .inspect(|p| {
                 log::info!("using WINEPREFIX derived from game dir: {}", p.display());
-                p
             })
             .unwrap_or_else(|| Self::managed_prefix_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let runtime_root = Self::runtime_root()?;

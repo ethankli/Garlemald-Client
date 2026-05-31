@@ -46,21 +46,21 @@ use crate::config;
 /// Wine's debug syntax is `[class][+/-]channel`. Without a class prefix,
 /// `-fixme` / `+err` treat those as *channel* names (which don't exist), so
 /// the obvious-looking `-fixme,+err` is a silent no-op. Correct form:
-///   * `fixme-all` — silence fixme for every channel
-///   * `err+all`   — keep err class enabled (it's on by default, but explicit
-///                    makes our intent clear)
-///   * `+seh`      — all classes for the seh channel, so crashes and unhandled
-///                    exceptions still surface
-///   * `+debugstr` — log every `OutputDebugStringA/W` call. Pairs with the
-///                    `assert_log_patch` PE patch, which redirects the
-///                    game's silent assert handler into `OutputDebugStringA`
-///                    so the assertion message lands in the wine log right
-///                    before the trap fires.
-///   * `warn+d3d`  — keep the wined3d WARN level on (otherwise silent),
-///                    so the rejection reason for failed `StretchRect` /
-///                    `Present` / surface-creation calls is visible. Wine's
-///                    WARN class is suppressed by default; the cinematic
-///                    crash trace lives here.
+/// * `fixme-all` — silence fixme for every channel
+/// * `err+all` — keep err class enabled (it's on by default, but explicit
+///   makes our intent clear)
+/// * `+seh` — all classes for the seh channel, so crashes and unhandled
+///   exceptions still surface
+/// * `+debugstr` — log every `OutputDebugStringA/W` call. Pairs with the
+///   `assert_log_patch` PE patch, which redirects the
+///   game's silent assert handler into `OutputDebugStringA`
+///   so the assertion message lands in the wine log right
+///   before the trap fires.
+/// * `warn+d3d` — keep the wined3d WARN level on (otherwise silent),
+///   so the rejection reason for failed `StretchRect` /
+///   `Present` / surface-creation calls is visible. Wine's
+///   WARN class is suppressed by default; the cinematic
+///   crash trace lives here.
 ///
 /// Callers that want more verbosity (e.g. `+relay,+module,+loaddll`) can set
 /// `WINEDEBUG` in the environment; we only fill this in as a default.

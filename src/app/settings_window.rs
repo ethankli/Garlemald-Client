@@ -59,13 +59,12 @@ impl SettingsModal {
                         egui::TextEdit::singleline(&mut self.game_location_text)
                             .desired_width(320.0),
                     );
-                    if ui.button("Browse…").clicked() {
-                        if let Some(folder) = rfd::FileDialog::new()
+                    if ui.button("Browse…").clicked()
+                        && let Some(folder) = rfd::FileDialog::new()
                             .set_title("Specify FFXIV folder")
                             .pick_folder()
-                        {
-                            self.game_location_text = folder.display().to_string();
-                        }
+                    {
+                        self.game_location_text = folder.display().to_string();
                     }
                 });
                 ui.separator();
