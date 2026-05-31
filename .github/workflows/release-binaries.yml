@@ -120,10 +120,16 @@ jobs:
         env:
           CERT_P12: ${{ secrets.MACOS_CERT_P12_BASE64 }}
           CERT_PWD: ${{ secrets.MACOS_CERT_PWD }}
-          KEYCHAIN_PWD: ${{ secrets.KEYCHAIN_PWD }}
         run: |
           set -euo pipefail
+          if [ -z "${CERT_PWD:-}" ]; then
+            echo "::error::MACOS_CERT_PWD is empty. macOS 'security import' cannot import a passwordless .p12 (it fails MAC verification even with -P \"\"). Re-export the Developer ID cert from Keychain Access WITH an export password and set MACOS_CERT_PWD."
+            exit 1
+          fi
           KC="$RUNNER_TEMP/build.keychain-db"
+          # Throwaway keychain password — generated per run (the keychain is created,
+          # used, and deleted within this job), so it need not be a stored secret.
+          KEYCHAIN_PWD="$(openssl rand -base64 24)"
           echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
           security create-keychain -p "$KEYCHAIN_PWD" "$KC"
           security set-keychain-settings -lut 21600 "$KC"   # no auto-lock mid-run
