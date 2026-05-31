@@ -1,0 +1,167 @@
+name: Release
+
+# SemVer release automation — see issue #8. Kept consistent with the matching
+# workflow in Garlemald-Server (issue #13); the only structural difference is this
+# crate is a single [package] (not a [workspace.package]).
+#
+# On every push/merge to `main` this workflow:
+#   1. reads the highest existing vX.Y.Z git tag (the source of truth),
+#   2. bumps PATCH by default, or MINOR/MAJOR when the merged PR carried a
+#      `release:minor` / `release:major` label,
+#   3. rewrites [package].version in Cargo.toml (which stamps the launcher binary
+#      and the embedded Windows resource) and syncs Cargo.lock,
+#   4. commits that back to `main` as `chore(release): vX.Y.Z`,
+#   5. pushes the matching annotated vX.Y.Z tag, and
+#   6. publishes a GitHub Release with auto-generated notes.
+#
+# Why a PAT (secret RELEASE_PAT): `main` is branch-protected (issue #9) and requires
+# the fmt/clippy/build-test checks, so the default GITHUB_TOKEN — which only has
+# write, not admin — cannot push the bump commit to `main` (GH006). A fine-grained
+# PAT scoped to THIS repo with Contents: write, owned by an admin, bypasses the
+# required checks because `enforce_admins` is off. Keep enforce_admins off, or the
+# bump push will be rejected.
+#
+# Loop guard: a PAT push DOES re-trigger workflows (unlike GITHUB_TOKEN). The bump
+# commit is deliberately NOT marked `[skip ci]` — that would also suppress the
+# tag-push event, and a future per-platform binary-release workflow (anticipated by
+# #8, mirroring Garlemald-Server's release-binaries.yml) will trigger on that tag.
+# Instead the bump loop is broken by the bot-identity `if` guard on the job.
+on:
+  push:
+    branches: [main]
+
+# Serialize releases so two quick merges produce monotonic tags (the second run
+# waits for the first to push its tag, then computes the next from it).
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  # Needed for the commits/{sha}/pulls label lookup below. Specifying `permissions`
+  # sets every unlisted scope to `none`, so this must be explicit or the lookup
+  # 403s and every release silently falls back to a patch bump.
+  pull-requests: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Loop guard: the bump commit is authored by github-actions[bot] and its push to
+    # main re-triggers this workflow (PAT push). This `if` skips those bot commits so
+    # we don't loop — gating on bot IDENTITY (not a message prefix) so a human commit
+    # that happens to start with "chore(release):" still releases. (We intentionally
+    # avoid [skip ci], which would also block the tag-push for a future binary-release.)
+    if: ${{ github.event.head_commit.author.email != '41898282+github-actions[bot]@users.noreply.github.com' }}
+    steps:
+      - name: Checkout main (full history + tags; PAT can push to protected main)
+        uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.RELEASE_PAT }}
+          fetch-depth: 0
+          ref: main
+
+      - name: Install pinned toolchain (for cargo update of the lockfile)
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+          cache: false
+
+      - name: Fetch all tags
+        run: git fetch --tags --force --prune
+
+      - name: Determine bump level from the merged PR's labels
+        id: level
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # PR(s) associated with this merge commit; labels decide minor/major.
+          # A direct push (no PR) -> empty -> patch. Manual `git tag vX.Y.0`/`vX.0.0`
+          # is also honored automatically via the highest-tag read below.
+          # An empty result is the legitimate "direct push, no PR" case (-> patch).
+          # A non-zero exit is an API/permission error: warn so a missed
+          # release:minor/major label is visible rather than silently downgraded.
+          if ! labels="$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" --jq '[.[].labels[].name] | join(",")')"; then
+            echo "::warning::Could not query PR labels for ${{ github.sha }}; defaulting to a patch bump (a release:minor/major label, if any, was NOT applied)."
+            labels=""
+          fi
+          echo "PR labels: ${labels:-<none>}"
+          level=patch
+          case ",$labels," in
+            *,release:major,*) level=major ;;
+            *,release:minor,*) level=minor ;;
+          esac
+          echo "level=$level" >> "$GITHUB_OUTPUT"
+          echo "Bump level: $level"
+
+      - name: Compute next version from the highest tag
+        id: ver
+        run: |
+          set -euo pipefail
+          latest="$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1 || true)"
+          latest="${latest:-v0.0.0}"
+          echo "Highest existing tag: $latest"
+          base="${latest#v}"
+          major="${base%%.*}"; rest="${base#*.}"; minor="${rest%%.*}"; patch="${rest#*.}"
+          case "${{ steps.level.outputs.level }}" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            *)     patch=$((patch + 1)) ;;
+          esac
+          new="${major}.${minor}.${patch}"
+          tag="v${new}"
+          echo "Next version: ${new} (tag ${tag})"
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "::error::Tag ${tag} already exists — aborting to avoid clobber."
+            exit 1
+          fi
+          echo "new=${new}"  >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}"  >> "$GITHUB_OUTPUT"
+
+      - name: Rewrite [package].version and sync Cargo.lock
+        run: |
+          set -euo pipefail
+          new="${{ steps.ver.outputs.new }}"
+          # NOTE: `new` is derived from the highest git TAG (the source of truth),
+          # not from the current Cargo.toml — a hand-edited Cargo.toml version above
+          # the highest tag would be overwritten back down. Use a manual tag to bump.
+          # Section-aware: only the version key inside [package] — never the
+          # version=... keys under [dependencies]/[build-dependencies].
+          awk -v V="$new" '
+            /^\[/ { in_pkg = ($0 == "[package]") }
+            in_pkg && /^[[:space:]]*version[[:space:]]*=/ { print "version = \"" V "\""; next }
+            { print }
+          ' Cargo.toml > Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
+          got="$(awk '/^\[/{w=($0=="[package]")} w&&/^[[:space:]]*version[[:space:]]*=/{split($0,a,"\"");print a[2];exit}' Cargo.toml)"
+          if [ "$got" != "$new" ]; then
+            echo "::error::Cargo.toml [package].version is '$got', expected '$new'"; exit 1
+          fi
+          echo "Cargo.toml [package].version = $got"
+          # Keep the committed lockfile in lockstep (the package's own lock entry),
+          # otherwise the next --locked CI build would fail.
+          cargo update --workspace
+          cargo metadata --format-version 1 --no-deps --locked >/dev/null
+          echo "Cargo.lock synced and consistent."
+
+      - name: Commit, tag, and push (atomic) to protected main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          new="${{ steps.ver.outputs.new }}"
+          tag="${{ steps.ver.outputs.tag }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          # NOT marked [skip ci] on purpose: the tag pushed below must be able to
+          # trigger a future binary-release workflow; [skip ci] would suppress that
+          # tag-push run. The bump loop is broken by the bot-identity `if` guard.
+          git commit -m "chore(release): ${tag}"
+          git tag -a "${tag}" -m "${tag}"
+          # All-or-nothing: never leave a tag without its bump commit (or vice versa).
+          git push --atomic origin HEAD:main "refs/tags/${tag}" || {
+            echo "::error::Push to protected main was rejected. RELEASE_PAT must be an admin-owned, repo-scoped token with Contents: write, AND branch protection must keep 'enforce_admins' OFF so the bump commit can bypass required checks. See docs/RELEASING.md."
+            exit 1
+          }
+          # Release notes are generated by the API from commits since the last tag.
+          gh release create "${tag}" --title "${tag}" --target main --generate-notes
+          echo "Released ${tag}"
