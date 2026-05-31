@@ -8,9 +8,36 @@ and `Cargo.lock` are kept in lockstep automatically. This mirrors the
 the only difference is `[package].version` here vs. `[workspace.package].version`
 there.
 
+## Branching model
+
+- **`develop`** is the default branch and the integration branch for day-to-day
+  work. Branch features off `develop` and PR back into it. `develop` is protected
+  and requires the CI checks (`fmt` / `clippy` / `build-test` on Linux/macOS/Windows)
+  plus an open pull request before merging (no approving review is required, so you
+  can merge your own PR once CI is green).
+- **`main`** is the protected release branch. A release is cut by opening a PR from
+  `develop` into `main`; when it merges, the push to `main` triggers `release.yml`
+  (version bump + tag), which in turn triggers `release-binaries.yml` (per-platform
+  launcher artifacts + the Discord announcement). **Nothing merged into `develop`
+  produces a release or a tag** — only the `develop` → `main` merge does.
+
+Flow: feature → `develop` (CI-gated) → release PR `develop` → `main` (CI-gated) →
+automatic bump + tag + GitHub Release with launcher artifacts + Discord announcement.
+
+> `main` intentionally does **not** require a pull request, so the release
+> automation can push the bump commit straight to it via `RELEASE_PAT`.
+>
+> The version bump lands on `main` only (the tag is the source of truth), so
+> `develop`'s `Cargo.toml` version may lag the latest tag between releases. This
+> does **not** cause merge conflicts — only `release.yml` ever edits the version
+> line, so each `develop` → `main` merge keeps `main`'s higher version
+> automatically. If you'd rather keep `develop`'s version current, periodically
+> merge `main` back into `develop` (a standard git-flow back-merge).
+
 ## How it works
 
-`.github/workflows/release.yml` runs on every push/merge to `main` and:
+`.github/workflows/release.yml` runs on every push/merge to `main` (i.e. when a
+`develop` → `main` release PR merges) and:
 
 1. reads the highest existing `vX.Y.Z` tag,
 2. picks a bump level (see below),
