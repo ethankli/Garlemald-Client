@@ -19,7 +19,7 @@
 //! Linux platform backend. Relies on a system-installed `wine` plus a
 //! user-managed prefix under `$XDG_DATA_HOME/garlemald-client/prefix`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow};
 
@@ -31,11 +31,17 @@ use crate::launcher::{
 };
 use crate::platform::Platform;
 use crate::platform::wine::{
-    PREFIX_FFXIV_SUBPATH, WineRuntime, copy_exe_for_patching, ensure_prefix_initialized,
-    launch_ffxiv_game, monotonic_ms_since_boot,
+    WineRuntime, copy_exe_for_patching, ensure_prefix_initialized, launch_ffxiv_game,
+    monotonic_ms_since_boot,
 };
 
 pub struct LinuxPlatform;
+
+impl Default for LinuxPlatform {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl LinuxPlatform {
     pub fn new() -> Self {

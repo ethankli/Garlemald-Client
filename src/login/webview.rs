@@ -77,7 +77,7 @@ pub fn run_webview(login_url: &str) -> Result<()> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-fn build_webview<'a>(window: &'a tao::window::Window, login_url: &str) -> Result<wry::WebView> {
+fn build_webview(window: &tao::window::Window, login_url: &str) -> Result<wry::WebView> {
     WebViewBuilder::new(window)
         .with_url(login_url)
         .with_navigation_handler(navigation_handler)

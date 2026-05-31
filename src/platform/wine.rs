@@ -96,6 +96,7 @@ pub struct WineRuntime {
     #[allow(dead_code)]
     pub wineserver_bin: PathBuf,
     /// Additional `DYLD_FALLBACK_LIBRARY_PATH` entries (macOS only).
+    #[allow(dead_code)] // read only in the macOS cfg block; dead on Linux.
     pub dyld_fallback_paths: Vec<PathBuf>,
     /// `gstreamer-1.0` plugin directory shipped in the runtime bundle. When
     /// `Some`, gets exported as `GST_PLUGIN_PATH` / `GST_PLUGIN_SYSTEM_PATH`
