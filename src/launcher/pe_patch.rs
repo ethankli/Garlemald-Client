@@ -29,7 +29,7 @@ use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use object::read::pe::PeFile32;
 use object::{Object, ObjectSection};
 
@@ -257,8 +257,8 @@ pub fn lobby_host_patch(host: &str) -> Result<PePatch> {
 /// to its RVA. This is a destructive edit of the file — callers should pass
 /// a working copy of `ffxivgame.exe`, not the original.
 pub fn apply_patches_on_disk(exe_path: &Path, patches: &[PePatch]) -> Result<()> {
-    let data = std::fs::read(exe_path)
-        .with_context(|| format!("reading {}", exe_path.display()))?;
+    let data =
+        std::fs::read(exe_path).with_context(|| format!("reading {}", exe_path.display()))?;
     let pe = PeFile32::parse(&*data)
         .with_context(|| format!("parsing PE headers of {}", exe_path.display()))?;
 

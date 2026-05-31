@@ -19,8 +19,8 @@
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use crc32fast::Hasher as Crc32Hasher;
@@ -83,7 +83,9 @@ impl Default for Downloader {
 
 impl Downloader {
     pub fn new() -> Self {
-        Self { progress: DownloadProgress::new() }
+        Self {
+            progress: DownloadProgress::new(),
+        }
     }
 
     /// Reuses an existing progress handle — use when the caller wants to
@@ -130,8 +132,8 @@ impl Downloader {
         };
 
         let tmp_path = tmp_download_path(dst_path);
-        let mut output = File::create(&tmp_path)
-            .with_context(|| format!("creating {}", tmp_path.display()))?;
+        let mut output =
+            File::create(&tmp_path).with_context(|| format!("creating {}", tmp_path.display()))?;
         let mut hasher = Crc32Hasher::new();
 
         let mut reader = response.into_reader();
@@ -164,8 +166,9 @@ impl Downloader {
             return Ok(DownloadResult::BadChecksum);
         }
 
-        fs::rename(&tmp_path, dst_path)
-            .with_context(|| format!("renaming {} -> {}", tmp_path.display(), dst_path.display()))?;
+        fs::rename(&tmp_path, dst_path).with_context(|| {
+            format!("renaming {} -> {}", tmp_path.display(), dst_path.display())
+        })?;
         Ok(DownloadResult::Success)
     }
 }
@@ -183,8 +186,7 @@ fn download_already_valid(path: &Path, expected_size: u64, expected_crc32: u32) 
 }
 
 pub fn compute_file_crc32(path: &Path) -> Result<u32> {
-    let file = File::open(path)
-        .with_context(|| format!("opening {} for CRC32", path.display()))?;
+    let file = File::open(path).with_context(|| format!("opening {} for CRC32", path.display()))?;
     let mut reader = BufReader::new(file);
     let mut hasher = Crc32Hasher::new();
     let mut buf = [0u8; 0x4000];

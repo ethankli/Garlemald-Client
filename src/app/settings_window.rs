@@ -40,9 +40,7 @@ pub struct SettingsModal {
 impl SettingsModal {
     pub fn new(initial: Option<&PathBuf>) -> Self {
         Self {
-            game_location_text: initial
-                .map(|p| p.display().to_string())
-                .unwrap_or_default(),
+            game_location_text: initial.map(|p| p.display().to_string()).unwrap_or_default(),
             open: true,
         }
     }

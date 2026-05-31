@@ -16,7 +16,7 @@
 //
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 fn main() -> Result<()> {
     // Surface panics that happen inside FFI callbacks (e.g. AppKit's

@@ -51,7 +51,7 @@ use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use flate2::read::ZlibDecoder;
 
 const MAGIC: [u8; 12] = [
@@ -69,9 +69,14 @@ pub fn apply_patch_file(patch_path: &Path, game_root: &Path) -> Result<PatchAppl
     let mut reader = BufReader::new(file);
 
     let mut sig = [0u8; 12];
-    reader.read_exact(&mut sig).context("reading ZIPATCH signature")?;
+    reader
+        .read_exact(&mut sig)
+        .context("reading ZIPATCH signature")?;
     if sig != MAGIC {
-        return Err(anyhow!("{} is not a ZIPATCH patch file", patch_path.display()));
+        return Err(anyhow!(
+            "{} is not a ZIPATCH patch file",
+            patch_path.display()
+        ));
     }
 
     let mut result = PatchApplyResult::default();
@@ -170,9 +175,10 @@ fn execute_etry<R: Read>(
             .with_context(|| format!("creating parent dir {}", parent.display()))?;
     }
     if !full_path.exists() {
-        result
-            .messages
-            .push(format!("Warning: File '{}' doesn't exist. Creating.", full_path.display()));
+        result.messages.push(format!(
+            "Warning: File '{}' doesn't exist. Creating.",
+            full_path.display()
+        ));
     }
 
     let item_count = read_u32_be(reader)?;
@@ -188,7 +194,9 @@ fn execute_etry<R: Read>(
 
         let compression_mode = read_u32_le(reader)?;
         if !(compression_mode == 0x4E || compression_mode == 0x5A) {
-            return Err(anyhow!("unexpected compression mode: 0x{compression_mode:X}"));
+            return Err(anyhow!(
+                "unexpected compression mode: 0x{compression_mode:X}"
+            ));
         }
         let compressed_size = read_u32_be(reader)?;
         let _previous_size = read_u32_be(reader)?;
@@ -231,7 +239,13 @@ fn join_patch_path(game_root: &Path, rel: &str) -> PathBuf {
     // Patch paths use backslashes; normalize to native separator.
     let normalized: String = rel
         .chars()
-        .map(|c| if c == '\\' { std::path::MAIN_SEPARATOR } else { c })
+        .map(|c| {
+            if c == '\\' {
+                std::path::MAIN_SEPARATOR
+            } else {
+                c
+            }
+        })
         .collect();
     game_root.join(normalized)
 }

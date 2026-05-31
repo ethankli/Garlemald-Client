@@ -22,11 +22,11 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 use crate::launcher::{
-    encryption_time_patch, lobby_host_patch, GameLaunchRequest, ENCRYPTION_TIME_PATCH_RVA,
-    LOBBY_HOST_NAME_RVA,
+    ENCRYPTION_TIME_PATCH_RVA, GameLaunchRequest, LOBBY_HOST_NAME_RVA, encryption_time_patch,
+    lobby_host_patch,
 };
 use crate::platform::Platform;
 
@@ -49,11 +49,10 @@ impl Platform for WindowsPlatform {
 }
 
 fn detect_from_registry() -> Result<Option<PathBuf>> {
-    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE};
     use winreg::RegKey;
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE};
 
-    const KEY: &str =
-        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{F2C4E6E0-EB78-4824-A212-6DF6AF0E8E82}";
+    const KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{F2C4E6E0-EB78-4824-A212-6DF6AF0E8E82}";
 
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     let key = match hklm.open_subkey_with_flags(KEY, KEY_QUERY_VALUE) {
@@ -71,15 +70,15 @@ fn detect_from_registry() -> Result<Option<PathBuf>> {
 fn launch_and_patch(game_dir: &Path, lobby_host: &str, session_id: &str) -> Result<()> {
     use std::ffi::CString;
 
-    use windows::core::PCSTR;
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::Debug::{
-        GetThreadContext, ReadProcessMemory, CONTEXT, CONTEXT_FULL_X86,
+        CONTEXT, CONTEXT_FULL_X86, GetThreadContext, ReadProcessMemory,
     };
     use windows::Win32::System::Threading::{
-        CreateProcessA, ResumeThread, TerminateProcess, CREATE_SUSPENDED,
-        NORMAL_PRIORITY_CLASS, PROCESS_INFORMATION, STARTUPINFOA,
+        CREATE_SUSPENDED, CreateProcessA, NORMAL_PRIORITY_CLASS, PROCESS_INFORMATION, ResumeThread,
+        STARTUPINFOA, TerminateProcess,
     };
+    use windows::core::PCSTR;
 
     let ticks = unsafe { windows::Win32::System::SystemInformation::GetTickCount() };
     let launch_args = crate::crypto::build_launch_arguments(session_id, ticks)?;
@@ -227,7 +226,7 @@ fn write_remote(
     bytes: &[u8],
 ) -> Result<()> {
     use windows::Win32::System::Diagnostics::Debug::WriteProcessMemory;
-    use windows::Win32::System::Memory::{VirtualProtectEx, PAGE_PROTECTION_FLAGS, PAGE_READWRITE};
+    use windows::Win32::System::Memory::{PAGE_PROTECTION_FLAGS, PAGE_READWRITE, VirtualProtectEx};
 
     let mut old_protect = PAGE_PROTECTION_FLAGS(0);
     unsafe {

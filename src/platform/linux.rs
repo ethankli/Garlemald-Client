@@ -21,20 +21,19 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 use crate::config;
 use crate::crypto;
 use crate::launcher::{
-    apply_patches_on_disk, assert_log_patch, encryption_time_patch, lobby_host_patch,
-    null_member8_write_nop_patch, null_this_guard_patch,
-    GameLaunchRequest,
-};
-use crate::platform::wine::{
-    copy_exe_for_patching, ensure_prefix_initialized, launch_ffxiv_game, monotonic_ms_since_boot,
-    WineRuntime, PREFIX_FFXIV_SUBPATH,
+    GameLaunchRequest, apply_patches_on_disk, assert_log_patch, encryption_time_patch,
+    lobby_host_patch, null_member8_write_nop_patch, null_this_guard_patch,
 };
 use crate::platform::Platform;
+use crate::platform::wine::{
+    PREFIX_FFXIV_SUBPATH, WineRuntime, copy_exe_for_patching, ensure_prefix_initialized,
+    launch_ffxiv_game, monotonic_ms_since_boot,
+};
 
 pub struct LinuxPlatform;
 
@@ -120,4 +119,3 @@ fn which_wine() -> Result<PathBuf> {
     }
     Ok(PathBuf::from(text))
 }
-

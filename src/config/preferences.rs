@@ -106,7 +106,10 @@ mod tests {
 
         let loaded = Preferences::load(&path).unwrap();
         assert_eq!(loaded.launcher.server_name, prefs.launcher.server_name);
-        assert_eq!(loaded.launcher.server_address, prefs.launcher.server_address);
+        assert_eq!(
+            loaded.launcher.server_address,
+            prefs.launcher.server_address
+        );
         assert_eq!(loaded.launcher.game_location, prefs.launcher.game_location);
     }
 

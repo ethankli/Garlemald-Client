@@ -18,4 +18,4 @@
 
 mod command_line;
 
-pub use command_line::{build_launch_arguments, LaunchArguments, SESSION_ID_LEN};
+pub use command_line::{LaunchArguments, SESSION_ID_LEN, build_launch_arguments};
