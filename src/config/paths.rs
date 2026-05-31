@@ -22,7 +22,7 @@ use anyhow::{Context, Result};
 use directories::ProjectDirs;
 
 fn project_dirs() -> Result<ProjectDirs> {
-    ProjectDirs::from("org", "seventhumbral", "garlemald-client")
+    ProjectDirs::from("me", "stegall", "garlemald-client")
         .context("could not resolve platform-specific project directories")
 }
 
