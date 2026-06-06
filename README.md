@@ -60,6 +60,32 @@ cargo build --release --target i686-pc-windows-msvc
 cargo run   --release --target i686-pc-windows-msvc
 ```
 
+## Documentation
+
+New contributor? These docs take you from zero to building the launcher to opening a
+pull request:
+
+- **[Contributing guide](CONTRIBUTING.md)** — request access, pick an issue, fork,
+  and open a PR (start here).
+- **[Architecture](docs/architecture.md)** — the launcher pipeline (detect → patch →
+  Wine → WebView login → launch), the module map, and how the client talks to a server.
+- **[Developer environment](docs/dev-environment.md)** — per-OS build/run, `RUST_LOG`
+  and Wine-log toggles, where launcher state lives + how to reset it, and running
+  against a local Garlemald-Server.
+- **[Working an issue with an AI agent](docs/agents.md)** — Claude / OpenAI setup; the
+  in-repo [`CLAUDE.md`](CLAUDE.md) / [`AGENTS.md`](AGENTS.md) tell the agent the house
+  rules.
+- **[Releasing](docs/RELEASING.md)** — the `develop` → `main` branching model and
+  release automation.
+
+## Contributing
+
+Contributions are welcome. The short version: ask for collaborator + project-board
+access on [Discord](https://discord.gg/CVjwWs6jnX), pick an issue from the board's
+**Ready** column, branch off **`develop`**, keep CI green
+(`fmt` / `clippy` / `build` / `test`), and open a PR into **`develop`**. The full
+walkthrough is in **[`CONTRIBUTING.md`](CONTRIBUTING.md)**.
+
 ## Attribution and licensing
 
 Garlemald Client derives from upstream projects under copyleft and
