@@ -31,8 +31,12 @@ use anyhow::{Context, Result};
 use tao::dpi::LogicalSize;
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoop};
+#[cfg(target_os = "linux")]
+use tao::platform::unix::WindowExtUnix;
 use tao::window::WindowBuilder;
 use wry::WebViewBuilder;
+#[cfg(target_os = "linux")]
+use wry::WebViewBuilderExtUnix;
 
 use crate::crypto::SESSION_ID_LEN;
 use crate::version::APP_NAME;
@@ -76,7 +80,24 @@ pub fn run_webview(login_url: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(target_os = "linux")]
+fn build_webview(window: &tao::window::Window, login_url: &str) -> Result<wry::WebView> {
+    // `WebViewBuilder::new(window)` builds from the raw window handle, which wry
+    // only supports under X11 — under Wayland it fails with "the window handle
+    // kind is not supported". Building from the tao window's GTK vbox embeds the
+    // WebKitGTK view at the widget level, which works under both X11 and Wayland
+    // (wry's own docs recommend `new_gtk` for Wayland support).
+    let vbox = window
+        .default_vbox()
+        .context("tao login window is missing its default GTK vbox")?;
+    WebViewBuilder::new_gtk(vbox)
+        .with_url(login_url)
+        .with_navigation_handler(navigation_handler)
+        .build()
+        .context("building wry webview")
+}
+
+#[cfg(target_os = "windows")]
 fn build_webview(window: &tao::window::Window, login_url: &str) -> Result<wry::WebView> {
     WebViewBuilder::new(window)
         .with_url(login_url)
