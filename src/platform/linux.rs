@@ -19,7 +19,7 @@
 //! Linux platform backend. Relies on a system-installed `wine` plus a
 //! user-managed prefix under `$XDG_DATA_HOME/garlemald-client/prefix`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 
@@ -30,6 +30,7 @@ use crate::launcher::{
     lobby_host_patch, null_member8_write_nop_patch, null_this_guard_patch,
 };
 use crate::platform::Platform;
+use crate::platform::dxvk;
 use crate::platform::wine::{
     WineRuntime, copy_exe_for_patching, ensure_prefix_initialized, launch_ffxiv_game,
     monotonic_ms_since_boot,
@@ -79,7 +80,18 @@ impl Platform for LinuxPlatform {
 
     fn launch_game(&self, request: &GameLaunchRequest) -> Result<()> {
         let runtime = Self::runtime_paths()?;
+        log::info!(
+            "using wine: {} ({})",
+            runtime.wine_bin.display(),
+            wine_version(&runtime.wine_bin).unwrap_or_else(|| "version unknown".into()),
+        );
         ensure_prefix_initialized(&runtime)?;
+
+        // Provision DXVK (Direct3D 9 → Vulkan) into the managed prefix. This is
+        // best-effort: on no-Vulkan / offline / disabled it returns None and the
+        // game runs on Wine's builtin wined3d. The returned fragment is merged
+        // into WINEDLLOVERRIDES by launch_ffxiv_game.
+        let dxvk_overrides = dxvk::ensure_dxvk(&runtime, &config::data_dir()?.join("runtime"));
 
         let tick = monotonic_ms_since_boot();
         let launch_args = crypto::build_launch_arguments(&request.session_id, tick)?;
@@ -103,9 +115,22 @@ impl Platform for LinuxPlatform {
             &launch_args.encoded_argument,
             request.wine_debug_override.as_deref(),
             request.enable_winsock_proxy,
+            dxvk_overrides.as_deref(),
         )?;
         Ok(())
     }
+}
+
+/// Best-effort `wine --version` for logging which runtime we resolved.
+fn wine_version(wine_bin: &Path) -> Option<String> {
+    let out = std::process::Command::new(wine_bin)
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 fn which_wine() -> Result<PathBuf> {
