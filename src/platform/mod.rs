@@ -60,3 +60,6 @@ pub fn current() -> ActivePlatform {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod wine;
+
+#[cfg(target_os = "linux")]
+mod dxvk;

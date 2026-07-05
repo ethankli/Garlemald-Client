@@ -175,6 +175,9 @@ impl Platform for MacosPlatform {
             &launch_args.encoded_argument,
             request.wine_debug_override.as_deref(),
             request.enable_winsock_proxy,
+            // DXVK auto-provisioning is Linux-only; the CrossOver engine
+            // provides the accelerated D3D path on macOS.
+            None,
         )?;
         Ok(())
     }
