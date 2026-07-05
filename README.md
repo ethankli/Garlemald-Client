@@ -102,12 +102,22 @@ which this project is distributed.
 
 ## Sister projects
 
-- [**Garlemald-Server**](https://github.com/swstegall/Garlemald-Server)
-  — the Rust FFXIV 1.23b server (lobby / world / map) this launcher is
+- **[meteor-decomp](https://github.com/swstegall/meteor-decomp)** —
+  clean-room decompilation of the FFXIV 1.23b Windows client binaries,
+  producing byte-identical recompiles and validated wire-protocol
+  ground truth.
+- **[decomp-agents](https://github.com/swstegall/decomp-agents)** —
+  parallel autonomous Claude agents that grind through meteor-decomp's
+  per-function matching workflow via a shared claim queue.
+- **[Garlemald Server](https://github.com/swstegall/Garlemald-Server)** —
+  the Rust FFXIV 1.23b server (lobby / world / map) this launcher is
   designed to connect to.
-- [**XIV-1.0-Apple-Silicon-Installer**](https://github.com/swstegall/XIV-1.0-Apple-Silicon-Installer)
-  — helper for getting a working FFXIV 1.x install on Apple Silicon
-  Macs, which Garlemald Client can then detect and drive.
+- **[XIV 1.0 Apple Silicon Installer](https://github.com/swstegall/XIV-1.0-Apple-Silicon-Installer)** —
+  helper for getting a working FFXIV 1.x install on Apple Silicon Macs,
+  which Garlemald Client can then detect and drive.
+- **[XIV 1.0 Linux Installer](https://github.com/swstegall/XIV-1.0-Linux-Installer)** —
+  helper for getting a working FFXIV 1.x install on x86_64 Linux, which
+  Garlemald Client can then detect and drive.
 
 ## Community
 
