@@ -134,6 +134,18 @@ fn wine_version(wine_bin: &Path) -> Option<String> {
 }
 
 fn which_wine() -> Result<PathBuf> {
+    // Explicit override wins — point Garlemald at a specific Wine build (to test
+    // an older/patched engine, or a self-managed one) without touching PATH.
+    if let Some(p) = std::env::var_os("GARLEMALD_WINE") {
+        let path = PathBuf::from(&p);
+        if path.is_file() {
+            return Ok(path);
+        }
+        return Err(anyhow!(
+            "GARLEMALD_WINE is set but {} is not a file",
+            path.display()
+        ));
+    }
     let out = std::process::Command::new("sh")
         .arg("-c")
         .arg("command -v wine")
@@ -141,7 +153,8 @@ fn which_wine() -> Result<PathBuf> {
         .context("locating wine via `command -v`")?;
     if !out.status.success() {
         return Err(anyhow!(
-            "no `wine` binary in PATH — install Wine 7+ via your distro package manager"
+            "no `wine` binary in PATH — install Wine 7+ via your distro package manager, \
+             or set GARLEMALD_WINE to a wine binary"
         ));
     }
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
