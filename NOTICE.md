@@ -65,8 +65,9 @@ GPL-3 → AGPL-3 combined-work rule (§13 of GPLv3) documented in
 ## Acknowledgments
 
 Thanks to Ioncannon, Jean-Philip Desjardins, and every contributor to
-Project Meteor Server, Seventh Umbral, the LandSandBoat and DarkStar
-Project developer teams (past and present), the FFXIV Classic wiki
+Project Meteor Server, Seventh Umbral, the BahamutXIV contributors,
+the LandSandBoat and DarkStar Project developer teams (past and
+present), the FFXIV Classic wiki
 (<http://ffxivclassic.fragmenterworks.com/wiki/>), and the wider
 community of 1.0 preservationists whose notes, spreadsheets, and
 packet captures made this port feasible.

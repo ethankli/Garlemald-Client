@@ -1,8 +1,22 @@
 # Bundled server list. Entries appear in the launcher's dropdown in the
-# order below. `Localhost` points at the sibling garlemald-server's Rust
-# login endpoint. `Project Meteor` points at the upstream PHP login_su
-# web server that ships with the C# Project Meteor reference impl --
-# handy when running it as a differential test against garlemald-server.
+# order below, and the FIRST entry is the fresh-install default selection.
+# `Localhost` points at the sibling garlemald-server's Rust login endpoint.
+# `Project Meteor` points at the upstream PHP login_su web server that
+# ships with the C# Project Meteor reference impl -- handy when running it
+# as a differential test against garlemald-server.
+
+# The public BahamutXIV server. Its lobby/world listen on the stock ports
+# the client learns from the patched binary, so only the host is needed.
+# The bahamut auth service is a JSON API with no web login page, so
+# login_url stays empty and api_url points at the auth API instead: the
+# launcher shows its native login/sign-up form. The api_url goes through
+# the stegall.me nginx TLS proxy (the client refuses to send passwords
+# over plain http to non-loopback hosts).
+[[server]]
+name = "Bahamut (main)"
+address = "bahamut.stegall.me"
+login_url = ""
+api_url = "https://bahamut.stegall.me/api/v1"
 
 [[server]]
 name = "Localhost"
@@ -13,3 +27,13 @@ login_url = "http://127.0.0.1:54993/login"
 name = "Project Meteor"
 address = "127.0.0.1"
 login_url = "http://127.0.0.1:8080/login.php"
+
+# The AetherXIV 1.3 docker stack in the sibling AetherXIV-EchoGate repo
+# (its main working line). Lobby on the stock 54994 port; the PHP web
+# container serves the login page on 8080. The page answers with the
+# retail x-sqexauth element, which the login WebView bridges to
+# ffxiv://login_success itself, so the normal Login flow works.
+[[server]]
+name = "AetherXIV 1.3 (Docker Local)"
+address = "127.0.0.1"
+login_url = "http://127.0.0.1:8080/login/index.php"

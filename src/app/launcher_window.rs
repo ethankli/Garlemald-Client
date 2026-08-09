@@ -17,22 +17,27 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use eframe::egui;
 
 use crate::app::developer_window::{DeveloperModal, DeveloperOutcome, VERBOSE_WINE_DEBUG};
+use crate::app::native_login_window::{NativeLoginModal, NativeLoginOutcome};
 use crate::app::patcher_window::PatcherScreen;
 use crate::app::settings_window::{SettingsModal, SettingsOutcome};
-use crate::config::{Preferences, bundled_config_path, data_dir, preferences_file_path};
+use crate::app::theme;
+use crate::config::{
+    Preferences, bundled_config_path, default_torrent_storage_dir, preferences_file_path,
+    torrent_session_dir,
+};
+use crate::install_check::{self, InstallState, InstallStatus};
 use crate::launcher::GameLaunchRequest;
 use crate::login::{LoginOutcome, LoginTask};
-use crate::patcher::PatchSource;
-use crate::patcher::check_game_version;
-use crate::patcher::manifest::total_bytes;
+use crate::patcher::{PatchPayload, PatchSource, Phase, check_game_version, find_patch_payload};
 use crate::platform::{Platform, current as current_platform};
 use crate::servers::ServerDefinitions;
+use crate::torrent::{TORRENT_ENDPOINT, TorrentService, TorrentServiceError, TorrentState};
 use crate::version::{APP_NAME, APP_VERSION, FFXIV_GAME_VERSION};
 
 pub fn run() -> Result<()> {
@@ -78,13 +83,13 @@ struct LauncherApp {
     settings_modal: Option<SettingsModal>,
     developer_modal: Option<DeveloperModal>,
     login_task: Option<LoginTask>,
+    native_login_modal: Option<NativeLoginModal>,
     outdated_prompt_open: bool,
-    download_confirm: Option<DownloadConfirmState>,
     last_message: Option<(MessageKind, String)>,
-}
-
-struct DownloadConfirmState {
-    download_dir: PathBuf,
+    torrent: TorrentService,
+    install_status: InstallStatus,
+    last_install_check: Instant,
+    torrent_apply_attempted: bool,
 }
 
 impl LauncherApp {
@@ -116,6 +121,38 @@ impl LauncherApp {
 
         let manual_server_address = prefs.launcher.server_address.clone();
 
+        let persistence_dir = torrent_session_dir().unwrap_or_else(|e| {
+            log::warn!(
+                "could not resolve the torrent session dir, falling back to a temp dir: {e}"
+            );
+            std::env::temp_dir().join("garlemald-torrent-session")
+        });
+        let torrent = TorrentService::new(persistence_dir);
+        // The service's seeding flag is always synced from the preference
+        // first so a download started THIS run also honors a persisted
+        // opt-out (the flag defaults to true inside the service). Resuming
+        // seeding of an already-downloaded payload from a previous run is
+        // never fatal: a fresh install has nothing to seed yet, and the
+        // service itself no-ops when nothing was ever downloaded.
+        torrent.set_seeding_enabled(prefs.launcher.seed_patches);
+        if prefs.launcher.seed_patches {
+            let storage_dir = prefs
+                .launcher
+                .patch_download_dir
+                .clone()
+                .or_else(|| default_torrent_storage_dir().ok());
+            if let Some(dir) = storage_dir {
+                torrent.ensure_seeding_if_complete(dir);
+            }
+        }
+
+        let resolved_location = prefs
+            .launcher
+            .game_location
+            .clone()
+            .or_else(|| detected_install.clone());
+        let install_status = install_check::check_install(resolved_location.as_deref());
+
         let mut app = Self {
             prefs,
             prefs_path,
@@ -128,9 +165,13 @@ impl LauncherApp {
             settings_modal: None,
             developer_modal: None,
             login_task: None,
+            native_login_modal: None,
             outdated_prompt_open: false,
-            download_confirm: None,
             last_message: None,
+            torrent,
+            install_status,
+            last_install_check: Instant::now(),
+            torrent_apply_attempted: false,
         };
         app.outdated_prompt_open = app.game_is_installed_but_outdated();
         app
@@ -149,18 +190,6 @@ impl LauncherApp {
         !check_game_version(&path)
     }
 
-    fn default_download_dir(&self) -> PathBuf {
-        self.prefs
-            .launcher
-            .patch_download_dir
-            .clone()
-            .unwrap_or_else(|| {
-                data_dir()
-                    .unwrap_or_else(|_| PathBuf::from("."))
-                    .join("ffxiv_patches")
-            })
-    }
-
     fn resolved_login_url(&self) -> Option<String> {
         let name = self.selected_server_name.as_ref()?;
         let def = self.servers.get(name)?;
@@ -168,6 +197,16 @@ impl LauncherApp {
             None
         } else {
             Some(def.login_url.clone())
+        }
+    }
+
+    fn resolved_api_url(&self) -> Option<String> {
+        let name = self.selected_server_name.as_ref()?;
+        let def = self.servers.get(name)?;
+        if def.api_url.is_empty() {
+            None
+        } else {
+            Some(def.api_url.clone())
         }
     }
 
@@ -188,6 +227,62 @@ impl LauncherApp {
         Some(def.address.clone())
     }
 
+    /// Resolves the effective patch-storage directory: a
+    /// `patch_download_dir` preference override wins over the platform
+    /// default (the user's Documents folder).
+    fn resolved_patch_storage_dir(&self) -> Option<PathBuf> {
+        self.prefs
+            .launcher
+            .patch_download_dir
+            .clone()
+            .or_else(|| default_torrent_storage_dir().ok())
+    }
+
+    fn refresh_install_status(&mut self) {
+        self.install_status =
+            install_check::check_install(self.resolved_game_location().as_deref());
+        self.last_install_check = Instant::now();
+        // The boot-time "your install is outdated" prompt answers a question
+        // that no longer exists once the gate reports Ready (the auto-chain
+        // or a manual apply patched the install behind it); leaving it open
+        // would offer a redundant full re-patch.
+        if self.install_ready() {
+            self.outdated_prompt_open = false;
+        }
+    }
+
+    fn install_ready(&self) -> bool {
+        matches!(self.install_status.state, InstallState::Ready)
+    }
+
+    /// Explains why login is blocked, mirrored next to the disabled Launch
+    /// button and used verbatim by the hard-block in the launch methods.
+    /// Empty once the gate is satisfied.
+    fn install_gate_message(&self) -> String {
+        match &self.install_status.state {
+            InstallState::NotFound => {
+                "Game install not found - set the game location in Game Settings.".to_string()
+            }
+            // game.ver alone can read 1.23b while the patched client binary
+            // is missing (an interrupted or hand-damaged install); telling
+            // that user their 1.23b client needs "the 1.23b patches" reads
+            // as a contradiction, so name the real problem instead.
+            InstallState::FoundNeedsPatch {
+                game_version: Some(v),
+            } if v == FFXIV_GAME_VERSION => {
+                "Client files are incomplete (ffxivgame.exe is missing) - re-apply the patches before logging in."
+                    .to_string()
+            }
+            InstallState::FoundNeedsPatch {
+                game_version: Some(v),
+            } => format!("Client is at {v} - apply the 1.23b patches before logging in."),
+            InstallState::FoundNeedsPatch { game_version: None } => {
+                "Client is not 1.23b - apply the patches before logging in.".to_string()
+            }
+            InstallState::Ready => String::new(),
+        }
+    }
+
     fn save_preferences(&mut self) {
         if let Some(name) = &self.selected_server_name {
             self.prefs.launcher.server_name = name.clone();
@@ -205,51 +300,15 @@ impl LauncherApp {
         self.last_message = Some((MessageKind::Error, msg.into()));
     }
 
-    /// Opens the download-confirmation modal; the actual patcher doesn't
-    /// start until the user clicks "Continue" in that modal.
-    fn start_update(&mut self) {
-        let Some(game_dir) = self.resolved_game_location() else {
-            self.set_error("No game location set. Use Game Settings to pick one.");
-            return;
-        };
-        let platform = current_platform();
-        if !platform.is_valid_game_location(&game_dir) {
-            self.set_error(format!(
-                "'{}' doesn't look like an FFXIV install (no ffxivboot.exe).",
-                game_dir.display()
-            ));
-            return;
-        }
-        self.download_confirm = Some(DownloadConfirmState {
-            download_dir: self.default_download_dir(),
-        });
-    }
-
-    fn kick_off_patcher(&mut self, download_dir: PathBuf) {
+    /// Kicks off the patcher against a resolved local patch source (either a
+    /// patch-cache directory or the extracted/zipped torrent payload).
+    /// Validates sizes + CRCs before applying.
+    fn kick_off_local_patcher(&mut self, source: PatchSource) {
         let Some(game_dir) = self.resolved_game_location() else {
             self.set_error("No game location set.");
             return;
         };
-        self.prefs.launcher.patch_download_dir = Some(download_dir.clone());
-        self.save_preferences();
-        self.screen = Screen::Patcher(PatcherScreen::start(
-            game_dir,
-            PatchSource::Download { download_dir },
-        ));
-    }
-
-    /// Kicks off the patcher against a user-chosen local directory that
-    /// already contains every manifest patch (e.g., another FFXIV 1.x install
-    /// with a populated patch cache). Validates sizes + CRCs before applying.
-    fn kick_off_local_patcher(&mut self, source_dir: PathBuf) {
-        let Some(game_dir) = self.resolved_game_location() else {
-            self.set_error("No game location set.");
-            return;
-        };
-        self.screen = Screen::Patcher(PatcherScreen::start(
-            game_dir,
-            PatchSource::Local { source_dir },
-        ));
+        self.screen = Screen::Patcher(PatcherScreen::start(game_dir, source));
     }
 
     /// Opens a folder picker for the user's existing patch cache, then
@@ -270,17 +329,194 @@ impl LauncherApp {
             ));
             return;
         }
-        let Some(source) = rfd::FileDialog::new()
+        let Some(picked) = rfd::FileDialog::new()
             .set_title("Select folder containing existing FFXIV 1.x patches")
             .pick_folder()
         else {
             return;
         };
+
+        // PatchDir IS the picked directory by construction; None falls
+        // through so verification reports the detailed missing-files error.
+        let source = match find_patch_payload(&picked) {
+            Some(PatchPayload::Zip(zip_path)) => PatchSource::LocalZip { zip_path },
+            _ => PatchSource::Local { source_dir: picked },
+        };
         self.kick_off_local_patcher(source);
     }
 
+    /// Starts (or resumes) downloading the patch torrent into the resolved
+    /// storage directory.
+    fn start_torrent_download(&mut self) {
+        let Some(dir) = self.resolved_patch_storage_dir() else {
+            self.set_error("Could not resolve a patch storage directory.");
+            return;
+        };
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.set_error(format!(
+                "Could not create patch storage directory {}: {e}",
+                dir.display()
+            ));
+            return;
+        }
+        self.torrent_apply_attempted = false;
+        match self
+            .torrent
+            .start_download(TORRENT_ENDPOINT.to_string(), dir)
+        {
+            Ok(()) => self.set_info("Fetching the patch torrent..."),
+            Err(TorrentServiceError::Busy) => self.set_info(
+                "A patch download is already running; patches apply automatically when it finishes.",
+            ),
+        }
+    }
+
+    /// Applies the already-downloaded torrent payload, locating either the
+    /// extracted patch directory or the payload zip via
+    /// [`find_patch_payload`].
+    fn kick_off_torrent_apply(&mut self) {
+        let Some(game_dir) = self.resolved_game_location() else {
+            self.set_error("No game location set. Use Game Settings to pick one.");
+            return;
+        };
+        let platform = current_platform();
+        if !platform.is_valid_game_location(&game_dir) {
+            self.set_error(format!(
+                "'{}' doesn't look like an FFXIV install (no ffxivboot.exe).",
+                game_dir.display()
+            ));
+            return;
+        }
+
+        // Narrowest first: the torrent's own content folder, then the live
+        // session's output root, then the configured storage dir. The wider
+        // roots can be something as large as the user's whole Documents
+        // folder, where even a capped scan is slow.
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if let Some(dir) = self.torrent.payload_dir() {
+            candidates.push(dir);
+        }
+        if let Some(dir) = self.torrent.session_output_dir()
+            && !candidates.contains(&dir)
+        {
+            candidates.push(dir);
+        }
+        if let Some(dir) = self.resolved_patch_storage_dir()
+            && !candidates.contains(&dir)
+        {
+            candidates.push(dir);
+        }
+
+        let source = match candidates.iter().find_map(|dir| find_patch_payload(dir)) {
+            Some(PatchPayload::Zip(zip_path)) => PatchSource::LocalZip { zip_path },
+            Some(PatchPayload::PatchDir(source_dir)) => PatchSource::Local { source_dir },
+            None => {
+                self.set_error(format!(
+                    "No downloaded patches were found in {}. Download them first.",
+                    candidates
+                        .first()
+                        .map(|d| d.display().to_string())
+                        .unwrap_or_else(|| "the storage directory".to_string())
+                ));
+                return;
+            }
+        };
+
+        self.screen = Screen::Patcher(PatcherScreen::start(game_dir, source));
+    }
+
+    /// Renders the torrent-download panel: its own block between the main
+    /// action row and the developer collapsing section.
+    fn render_torrent_section(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        let snapshot = self.torrent.snapshot();
+        match snapshot.state {
+            TorrentState::Idle => {
+                ui.horizontal(|ui| {
+                    if ui.button("Download Patches via Torrent").clicked() {
+                        self.start_torrent_download();
+                    }
+                    if self.install_ready() {
+                        ui.small("Game is up to date - downloading only helps seed.");
+                    }
+                });
+            }
+            TorrentState::Resolving => {
+                ui.horizontal(|ui| {
+                    ui.label("Fetching the patch torrent...");
+                    if ui.button("Cancel").clicked() {
+                        self.torrent.stop();
+                    }
+                });
+            }
+            TorrentState::Downloading => {
+                let total = snapshot.total_bytes.max(1);
+                let fraction = (snapshot.progress_bytes as f64 / total as f64).clamp(0.0, 1.0);
+                ui.label(format!(
+                    "Downloading patches: {} / {} ({:.1}%) - {}/s - {} peers",
+                    format_bytes(snapshot.progress_bytes),
+                    format_bytes(snapshot.total_bytes),
+                    fraction * 100.0,
+                    format_bytes(snapshot.download_bps),
+                    snapshot.peers,
+                ));
+                let bar = egui::ProgressBar::new(fraction as f32)
+                    .text(format!("{:.1}%", fraction * 100.0))
+                    .desired_width(ui.available_width());
+                ui.add(bar);
+                if ui.button("Cancel").clicked() {
+                    self.torrent.stop();
+                    self.set_info("Torrent download stopped.");
+                }
+            }
+            TorrentState::Complete => {
+                ui.colored_label(theme::success(ui.visuals()), "Patch archive downloaded.");
+                if !self.install_ready() && ui.button("Apply Downloaded Patches").clicked() {
+                    self.kick_off_torrent_apply();
+                }
+            }
+            TorrentState::Seeding => {
+                ui.colored_label(
+                    theme::success(ui.visuals()),
+                    format!(
+                        "Seeding - {} peers - {} uploaded",
+                        snapshot.peers,
+                        format_bytes(snapshot.uploaded_bytes),
+                    ),
+                );
+                if !self.install_ready() && ui.button("Apply Downloaded Patches").clicked() {
+                    self.kick_off_torrent_apply();
+                }
+            }
+            TorrentState::Stopped => {
+                ui.colored_label(theme::warn(ui.visuals()), "Torrent download stopped.");
+                if ui.button("Resume Download").clicked() {
+                    self.start_torrent_download();
+                }
+            }
+            TorrentState::Error => {
+                let message = snapshot
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "Torrent download failed.".to_string());
+                ui.colored_label(theme::error(ui.visuals()), message);
+                if ui.button("Retry Download").clicked() {
+                    self.start_torrent_download();
+                }
+            }
+        }
+    }
+
     fn launch_via_login(&mut self) {
-        if self.login_task.is_some() {
+        // Defense in depth: the Launch button is already disabled while the
+        // install gate isn't Ready, but re-check here in case state went
+        // stale between the last poll and this click.
+        self.refresh_install_status();
+        if !self.install_ready() {
+            self.set_error(self.install_gate_message());
+            return;
+        }
+        if self.login_task.is_some() || self.native_login_modal.is_some() {
             self.set_info("Login window already open.");
             return;
         }
@@ -293,8 +529,19 @@ impl LauncherApp {
             return;
         }
         let Some(login_url) = self.resolved_login_url() else {
+            // No login webview supplied: fall back to the native JSON
+            // login/sign-up form when the server exposes an auth API.
+            if let Some(api_url) = self.resolved_api_url() {
+                let server_name = self
+                    .selected_server_name
+                    .clone()
+                    .unwrap_or_else(|| "server".into());
+                self.save_preferences();
+                self.native_login_modal = Some(NativeLoginModal::new(server_name, api_url));
+                return;
+            }
             self.set_error(
-                "Selected server has no login URL. Use the developer session-id override.",
+                "Selected server has no login URL or auth API. Use the developer session-id override.",
             );
             return;
         };
@@ -336,6 +583,12 @@ impl LauncherApp {
     }
 
     fn launch_with_dev_session_id(&mut self) {
+        // Defense in depth: mirrors the same gate check in launch_via_login.
+        self.refresh_install_status();
+        if !self.install_ready() {
+            self.set_error(self.install_gate_message());
+            return;
+        }
         let session_id = self.dev_session_id.trim().to_string();
         if session_id.len() != crate::crypto::SESSION_ID_LEN {
             self.set_error(format!(
@@ -381,8 +634,12 @@ impl LauncherApp {
                     self.developer_modal = Some(DeveloperModal::new(&self.prefs.developer));
                 }
                 if ui.button("Game Settings…").clicked() {
-                    let current = self.prefs.launcher.game_location.clone();
-                    self.settings_modal = Some(SettingsModal::new(current.as_ref()));
+                    let current_game = self.prefs.launcher.game_location.clone();
+                    self.settings_modal = Some(SettingsModal::new(
+                        current_game.as_ref(),
+                        self.prefs.launcher.patch_download_dir.as_ref(),
+                        self.prefs.launcher.seed_patches,
+                    ));
                 }
             });
         });
@@ -415,7 +672,7 @@ impl LauncherApp {
 
         ui.separator();
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Game location:");
             let shown = self
                 .resolved_game_location()
@@ -423,18 +680,20 @@ impl LauncherApp {
                 .unwrap_or_else(|| "(not set)".to_string());
             ui.monospace(shown);
         });
-        if let Some(path) = self.resolved_game_location() {
-            let up_to_date = check_game_version(&path);
-            let (label, color) = if up_to_date {
-                (
-                    "game.ver matches expected version",
-                    egui::Color32::LIGHT_GREEN,
-                )
+        if self.resolved_game_location().is_some() {
+            // Derived from the cached install gate rather than re-reading
+            // game.ver from disk: with the torrent repaint cadence this
+            // renders at ~2 Hz for as long as the launcher seeds.
+            let up_to_date = self.install_ready();
+            let label = if up_to_date {
+                "game.ver matches expected version"
             } else {
-                (
-                    "game.ver missing or outdated — use Check for Updates",
-                    egui::Color32::YELLOW,
-                )
+                "install not fully patched"
+            };
+            let color = if up_to_date {
+                theme::success(ui.visuals())
+            } else {
+                theme::warn(ui.visuals())
             };
             ui.colored_label(color, label);
         }
@@ -442,19 +701,19 @@ impl LauncherApp {
         ui.separator();
 
         ui.horizontal(|ui| {
-            if ui.button("Check for Updates").clicked() {
-                self.start_update();
-            }
             if ui.button("Install from Local Patches…").clicked() {
                 self.start_local_install();
             }
-            let login_in_flight = self.login_task.is_some();
+            let login_in_flight = self.login_task.is_some() || self.native_login_modal.is_some();
             let launch_button = egui::Button::new(if login_in_flight {
                 "Login in progress…"
             } else {
                 "Launch"
             });
-            if ui.add_enabled(!login_in_flight, launch_button).clicked() {
+            if ui
+                .add_enabled(!login_in_flight && self.install_ready(), launch_button)
+                .clicked()
+            {
                 self.launch_via_login();
             }
             if login_in_flight && ui.button("Cancel Login").clicked() {
@@ -462,9 +721,15 @@ impl LauncherApp {
                     task.cancel();
                 }
                 self.login_task = None;
+                self.native_login_modal = None;
                 self.set_info("Login cancelled.");
             }
         });
+        if !self.install_ready() {
+            ui.colored_label(theme::warn(ui.visuals()), self.install_gate_message());
+        }
+
+        self.render_torrent_section(ui);
 
         ui.add_space(8.0);
         ui.collapsing("Developer: launch with a manual session id", |ui| {
@@ -484,8 +749,8 @@ impl LauncherApp {
         ui.separator();
         if let Some((kind, msg)) = self.last_message.clone() {
             let color = match kind {
-                MessageKind::Info => egui::Color32::LIGHT_BLUE,
-                MessageKind::Error => egui::Color32::LIGHT_RED,
+                MessageKind::Info => theme::info(ui.visuals()),
+                MessageKind::Error => theme::error(ui.visuals()),
             };
             ui.colored_label(color, msg);
         }
@@ -496,9 +761,42 @@ impl LauncherApp {
                 SettingsOutcome::Cancelled => {
                     self.settings_modal = None;
                 }
-                SettingsOutcome::Accepted(new_location) => {
-                    self.prefs.launcher.game_location = new_location;
+                SettingsOutcome::Accepted(values) => {
+                    self.prefs.launcher.game_location = values.game_location;
+
+                    let storage_changed =
+                        values.patch_download_dir != self.prefs.launcher.patch_download_dir;
+                    if storage_changed
+                        && matches!(
+                            self.torrent.snapshot().state,
+                            TorrentState::Resolving | TorrentState::Downloading
+                        )
+                    {
+                        // Repointing the storage folder mid-download would strand
+                        // the in-flight bytes at the old root (the session's
+                        // output dir is fixed at creation); make the user cancel
+                        // first. The other fields still apply below.
+                        self.set_error(
+                            "Cancel the in-progress patch download before changing the patch storage folder.",
+                        );
+                    } else {
+                        self.prefs.launcher.patch_download_dir = values.patch_download_dir;
+                        // A session that already exists keeps the output
+                        // root it was created with; only a session started
+                        // after this point (usually the next launcher run)
+                        // picks up the new folder.
+                        if storage_changed && self.torrent.session_output_dir().is_some() {
+                            self.set_info(
+                                "Patch storage folder saved. The live torrent session keeps its \
+                                 current folder; the new one applies from the next launcher start.",
+                            );
+                        }
+                    }
+
+                    self.prefs.launcher.seed_patches = values.seed_patches;
+                    self.torrent.set_seeding_enabled(values.seed_patches);
                     self.save_preferences();
+                    self.refresh_install_status();
                     self.settings_modal = None;
                 }
             }
@@ -518,8 +816,22 @@ impl LauncherApp {
             }
         }
 
+        if let Some(modal) = self.native_login_modal.as_mut() {
+            match modal.render(ctx) {
+                NativeLoginOutcome::Open => {}
+                NativeLoginOutcome::Cancelled => {
+                    self.native_login_modal = None;
+                    self.set_info("Login cancelled.");
+                }
+                NativeLoginOutcome::Success(session_id) => {
+                    self.native_login_modal = None;
+                    self.set_info("Login complete; launching game…");
+                    self.launch_game_with_session(session_id);
+                }
+            }
+        }
+
         self.render_outdated_prompt(ctx);
-        self.render_download_confirm(ctx);
     }
 
     fn render_outdated_prompt(&mut self, ctx: &egui::Context) {
@@ -535,12 +847,12 @@ impl LauncherApp {
             .movable(true)
             .open(&mut window_open)
             .show(ctx, |ui| {
-                ui.label(format!(
-                    "Your game install appears to be out of date.\nWould you like to update it to version {FFXIV_GAME_VERSION}?"
-                ));
+                ui.label(
+                    "Your game install appears to be out of date.\nDownload the 1.23b patches via BitTorrent (about 6 GB) and apply them automatically?",
+                );
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if ui.button("Update").clicked() {
+                    if ui.button("Download and Update").clicked() {
                         accept = true;
                     }
                     if ui.button("Not now").clicked() {
@@ -553,62 +865,7 @@ impl LauncherApp {
         }
         if accept {
             self.outdated_prompt_open = false;
-            self.start_update();
-        }
-    }
-
-    fn render_download_confirm(&mut self, ctx: &egui::Context) {
-        let Some(state) = self.download_confirm.as_mut() else {
-            return;
-        };
-        let mut window_open = true;
-        let mut proceed = false;
-        let mut choose_dir = false;
-        let mut cancel = false;
-        let gigabytes = total_bytes() as f64 / 1_000_000_000.0;
-        egui::Window::new("Patch Download Location")
-            .collapsible(false)
-            .resizable(false)
-            .open(&mut window_open)
-            .show(ctx, |ui| {
-                ui.label(format!(
-                    "The launcher needs to download approximately {gigabytes:.2} GB of data\n\
-                     to update the game. Files will be stored at:"
-                ));
-                ui.monospace(state.download_dir.display().to_string());
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button("Continue").clicked() {
-                        proceed = true;
-                    }
-                    if ui.button("Choose different location…").clicked() {
-                        choose_dir = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        cancel = true;
-                    }
-                });
-            });
-
-        if choose_dir {
-            if let Some(folder) = rfd::FileDialog::new()
-                .set_title("Specify patch download location")
-                .pick_folder()
-            {
-                state.download_dir = folder;
-            }
-            return;
-        }
-
-        if !window_open || cancel {
-            self.download_confirm = None;
-            return;
-        }
-
-        if proceed {
-            let dir = state.download_dir.clone();
-            self.download_confirm = None;
-            self.kick_off_patcher(dir);
+            self.start_torrent_download();
         }
     }
 }
@@ -616,6 +873,39 @@ impl LauncherApp {
 impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_login_task();
+
+        let on_main_screen = matches!(self.screen, Screen::Main);
+        if on_main_screen && self.last_install_check.elapsed() >= Duration::from_secs(3) {
+            self.refresh_install_status();
+        }
+
+        // Auto-chain: once the torrent payload lands while the install
+        // still needs patching, kick off the apply without waiting for the
+        // user to notice and click through. Mirrors bahamut-launcher's
+        // maybeAutoChainPatch install gate.
+        let no_modal_open = self.settings_modal.is_none()
+            && self.developer_modal.is_none()
+            && self.native_login_modal.is_none();
+        if on_main_screen
+            && no_modal_open
+            && !self.torrent_apply_attempted
+            && matches!(
+                self.install_status.state,
+                InstallState::FoundNeedsPatch { .. }
+            )
+            && matches!(
+                self.torrent.snapshot().state,
+                TorrentState::Complete | TorrentState::Seeding
+            )
+        {
+            self.torrent_apply_attempted = true;
+            // The apply answers the boot-time "update your install?" prompt;
+            // close it so it cannot linger behind the patcher screen and
+            // reappear over the freshly patched install.
+            self.outdated_prompt_open = false;
+            log::info!("torrent payload ready; starting patch apply");
+            self.kick_off_torrent_apply();
+        }
 
         let in_patcher = matches!(self.screen, Screen::Patcher(_));
         let mut dismiss_patcher = false;
@@ -638,13 +928,52 @@ impl eframe::App for LauncherApp {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
 
+        // Keep polling while a torrent download/seed session is live so the
+        // progress bar and byte counters actually move.
+        if !matches!(
+            self.torrent.snapshot().state,
+            TorrentState::Idle | TorrentState::Stopped
+        ) {
+            ctx.request_repaint_after(Duration::from_millis(500));
+        }
+
         if dismiss_patcher {
+            // The Close button is reachable from every terminal phase, so
+            // the farewell message must match how the run actually ended.
+            let (phase, error) = match &self.screen {
+                Screen::Patcher(screen) => (screen.phase(), screen.error()),
+                Screen::Main => (Phase::Done, None),
+            };
             self.screen = Screen::Main;
-            self.set_info("Update complete.");
+            match phase {
+                Phase::Error => {
+                    let detail = error.unwrap_or_else(|| "see the log for details".to_string());
+                    self.set_error(format!("Update failed: {detail}"));
+                }
+                Phase::Cancelled => self.set_info("Update cancelled."),
+                _ => self.set_info("Update complete."),
+            }
+            self.refresh_install_status();
         }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.save_preferences();
+    }
+}
+
+/// Local byte formatter mirroring `patcher_window::format_kb`'s shape but
+/// keyed off the torrent snapshot's raw byte counts.
+fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * KB;
+    const GB: f64 = 1024.0 * MB;
+    let b = bytes as f64;
+    if b >= GB {
+        format!("{:.2} GB", b / GB)
+    } else if b >= MB {
+        format!("{:.2} MB", b / MB)
+    } else {
+        format!("{:.0} KB", b / KB)
     }
 }

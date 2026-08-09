@@ -21,11 +21,11 @@
 //! A managed "runtime" looks like:
 //!
 //! ```text
-//! <data_dir>/garlemald-client/
+//! <data_dir>/    (per-app dir, e.g. ~/Library/Application Support/me.stegall.garlemald-client/ on macOS)
 //! ├── prefix/                              # WINEPREFIX
 //! │   └── drive_c/Program Files (x86)/SquareEnix/FINAL FANTASY XIV/
 //! └── runtime/                             # macOS only
-//!     ├── wswine.bundle/                   # Sikarugir CrossOver engine
+//!     ├── wswine.bundle/                   # Sikarugir Wine engine
 //!     └── Frameworks/                      # bundled MoltenVK, libinotify, …
 //! ```
 //!
@@ -47,10 +47,8 @@ use crate::config;
 /// `-fixme` / `+err` treat those as *channel* names (which don't exist), so
 /// the obvious-looking `-fixme,+err` is a silent no-op. Correct form:
 /// * `fixme-all` — silence fixme for every channel
-/// * `err+all` — keep err class enabled (it's on by default, but explicit
-///   makes our intent clear)
-/// * `+seh` — all classes for the seh channel, so crashes and unhandled
-///   exceptions still surface
+/// * `err+all` — keep the err class on for every channel. This also
+///   surfaces genuine crashes / unhandled exceptions as `err:seh`.
 /// * `+debugstr` — log every `OutputDebugStringA/W` call. Pairs with the
 ///   `assert_log_patch` PE patch, which redirects the
 ///   game's silent assert handler into `OutputDebugStringA`
@@ -62,9 +60,19 @@ use crate::config;
 ///   WARN class is suppressed by default; the cinematic
 ///   crash trace lives here.
 ///
+/// `+seh` is deliberately NOT in this default. It enables every class
+/// (including `trace`) on the seh channel, so Wine writes a full CPU register
+/// dump on every stack unwind — and FFXIV 1.0 fires a storm of `longjmp`
+/// unwinds (`RtlUnwindEx code=STATUS_LONGJUMP`) once in-world. With Wine's
+/// stdout/stderr redirected to `wine.log`, that floods the disk and drops the
+/// game to a slideshow (GPU near-idle, CPU pinned in the trace path). Genuine
+/// crashes still surface via `err+all` (`err:seh`); full seh tracing is
+/// available on demand through the "verbose Wine debug logging" developer
+/// toggle (see `VERBOSE_WINE_DEBUG` in `app/developer_window.rs`).
+///
 /// Callers that want more verbosity (e.g. `+relay,+module,+loaddll`) can set
 /// `WINEDEBUG` in the environment; we only fill this in as a default.
-const WINEDEBUG_DEFAULT: &str = "fixme-all,err+all,+seh,+debugstr,warn+d3d";
+const WINEDEBUG_DEFAULT: &str = "fixme-all,err+all,+debugstr,warn+d3d";
 
 /// Relative path inside the prefix to the FFXIV install root, matching the
 /// default the InstallShield installer uses.
@@ -175,6 +183,7 @@ pub fn launch_ffxiv_game(
     encoded_argument: &str,
     wine_debug_override: Option<&str>,
     enable_winsock_proxy: bool,
+    extra_dll_overrides: Option<&str>,
 ) -> Result<()> {
     // Resolve / tear down the ws2_32 DLL-hijack proxy before we fork
     // the game process. The proxy logs every `send`/`recv`/etc. call to
@@ -185,18 +194,13 @@ pub fn launch_ffxiv_game(
         apply_winsock_proxy(runtime, game_dir, enable_winsock_proxy)
             .unwrap_or_else(|e| log::warn!("winsock proxy deploy skipped: {e:#}"));
     }
-    // Wine classifies `ws2_32.dll` as a builtin and loads it from its
-    // own WINEDLLPATH bundle regardless of what sits next to the exe.
-    // `WINEDLLOVERRIDES=ws2_32=n,b` tells the loader to try the native
-    // (file-based) copy first, then fall back to the builtin on miss.
-    // The comma separates the preferred order; `n` alone would reject
-    // the builtin entirely and break the unhooked fallback when the
-    // proxy isn't deployed, so we pair it with `b`.
-    let winsock_override = if enable_winsock_proxy {
-        Some("ws2_32=n,b".to_string())
-    } else {
-        None
-    };
+    // Wine classifies `ws2_32.dll` as a builtin and loads it from its own
+    // WINEDLLPATH bundle regardless of what sits next to the exe. `ws2_32=n,b`
+    // tells the loader to try the native (file-based) copy first, then fall
+    // back to the builtin on miss. The comma separates the preferred order; `n`
+    // alone would reject the builtin entirely and break the unhooked fallback
+    // when the proxy isn't deployed, so we pair it with `b`. It is assembled
+    // into WINEDLLOVERRIDES alongside any DXVK overrides just before launch.
     let log_path = wine_log_path()?;
     let log_file = OpenOptions::new()
         .create(true)
@@ -231,13 +235,23 @@ pub fn launch_ffxiv_game(
         cmd.current_dir(cwd);
     }
     runtime.configure_command_with_debug(&mut cmd, wine_debug_override);
-    if let Some(ovr) = &winsock_override {
-        // Setting the env var on the specific Command — not the parent
-        // process — keeps the override scoped to this launch. Wine
-        // reads WINEDLLOVERRIDES on process start so this happens
-        // before any DLL resolution inside the game.
-        cmd.env("WINEDLLOVERRIDES", ovr);
-        log::info!("WINEDLLOVERRIDES={}", ovr);
+    // Assemble WINEDLLOVERRIDES for this launch: DXVK's native D3D DLLs (Linux,
+    // `d3d9=n,b;dxgi=n,b`) plus, when the winsock proxy is on, `ws2_32=n,b` (see
+    // the note above). Entries are `;`-joined. Setting it on this specific
+    // Command — not the parent process — keeps the override scoped to this
+    // launch; Wine reads WINEDLLOVERRIDES on process start, before any DLL
+    // resolution inside the game.
+    let mut dll_overrides: Vec<&str> = Vec::new();
+    if let Some(dxvk) = extra_dll_overrides {
+        dll_overrides.push(dxvk);
+    }
+    if enable_winsock_proxy {
+        dll_overrides.push("ws2_32=n,b");
+    }
+    if !dll_overrides.is_empty() {
+        let joined = dll_overrides.join(";");
+        log::info!("WINEDLLOVERRIDES={joined}");
+        cmd.env("WINEDLLOVERRIDES", joined);
     }
 
     log::info!(

@@ -18,7 +18,11 @@
 
 //! Child-process entry point: hosts a single tao window with a wry WebView
 //! pointed at the server's login page and intercepts navigation to the
-//! `ffxiv://login_success?sessionId=…` custom scheme.
+//! `ffxiv://login_success?sessionId=…` custom scheme. Login pages that
+//! instead answer with the retail-era `<x-sqexauth sid="…">` element
+//! (Project Meteor lineage servers such as AetherXIV 1.3) are bridged to
+//! the same scheme by an injected script that scrapes the element and
+//! triggers the `ffxiv://` navigation itself.
 //!
 //! Communicates the outcome to the parent over stdout using three
 //! one-line sentinels defined below. The parent (see
@@ -31,14 +35,33 @@ use anyhow::{Context, Result};
 use tao::dpi::LogicalSize;
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoop};
+#[cfg(target_os = "linux")]
+use tao::platform::unix::WindowExtUnix;
 use tao::window::WindowBuilder;
 use wry::WebViewBuilder;
+#[cfg(target_os = "linux")]
+use wry::WebViewBuilderExtUnix;
 
 use crate::crypto::SESSION_ID_LEN;
 use crate::version::APP_NAME;
 
 /// Printed on success, followed by the 56-char session id.
 pub const SESSION_PREFIX: &str = "SESSION_ID=";
+
+/// Bridges the retail `<x-sqexauth sid="…"/>` login contract to the
+/// `ffxiv://login_success` navigation the handler below understands.
+/// Runs on every page load; pages without the element are untouched.
+const SQEXAUTH_BRIDGE_SCRIPT: &str = r#"
+document.addEventListener("DOMContentLoaded", function () {
+    var el = document.querySelector("x-sqexauth");
+    if (el) {
+        var sid = el.getAttribute("sid");
+        if (sid) {
+            window.location.href = "ffxiv://login_success?sessionId=" + sid;
+        }
+    }
+});
+"#;
 /// Printed when the user closes the webview without logging in.
 pub const CANCEL_SENTINEL: &str = "LOGIN_CANCELLED";
 /// Printed when the webview itself errors out (e.g. fails to load).
@@ -76,10 +99,29 @@ pub fn run_webview(login_url: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(target_os = "linux")]
+fn build_webview(window: &tao::window::Window, login_url: &str) -> Result<wry::WebView> {
+    // `WebViewBuilder::new(window)` builds from the raw window handle, which wry
+    // only supports under X11 — under Wayland it fails with "the window handle
+    // kind is not supported". Building from the tao window's GTK vbox embeds the
+    // WebKitGTK view at the widget level, which works under both X11 and Wayland
+    // (wry's own docs recommend `new_gtk` for Wayland support).
+    let vbox = window
+        .default_vbox()
+        .context("tao login window is missing its default GTK vbox")?;
+    WebViewBuilder::new_gtk(vbox)
+        .with_url(login_url)
+        .with_initialization_script(SQEXAUTH_BRIDGE_SCRIPT)
+        .with_navigation_handler(navigation_handler)
+        .build()
+        .context("building wry webview")
+}
+
+#[cfg(target_os = "windows")]
 fn build_webview(window: &tao::window::Window, login_url: &str) -> Result<wry::WebView> {
     WebViewBuilder::new(window)
         .with_url(login_url)
+        .with_initialization_script(SQEXAUTH_BRIDGE_SCRIPT)
         .with_navigation_handler(navigation_handler)
         .build()
         .context("building wry webview")
@@ -91,6 +133,7 @@ fn build_webview(window: &tao::window::Window, login_url: &str) -> Result<wry::W
     // since the window has no other content.
     WebViewBuilder::new(window)
         .with_url(login_url)
+        .with_initialization_script(SQEXAUTH_BRIDGE_SCRIPT)
         .with_navigation_handler(navigation_handler)
         .build()
         .context("building wry webview")
