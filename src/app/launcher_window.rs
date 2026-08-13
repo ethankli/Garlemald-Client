@@ -660,11 +660,21 @@ impl LauncherApp {
                 .filter(|p| !p.outcome.is_open())
                 .map(|p| format!("{} port {}: {}", p.role, p.port, p.outcome))
                 .collect();
-            self.set_error(format!(
-                "Cannot reach {} — {}. The game will not get past character select.",
-                report.address,
-                bad.join("; ")
-            ));
+            if bad.is_empty() {
+                // No per-port detail: the probe itself never ran (the
+                // worker could not start), so claiming a specific port
+                // is unreachable would be a guess.
+                self.set_error(format!(
+                    "Could not check whether {} is reachable — the connection probe did not run.",
+                    report.address
+                ));
+            } else {
+                self.set_error(format!(
+                    "Cannot reach {} — {}. The game will not get past character select.",
+                    report.address,
+                    bad.join("; ")
+                ));
+            }
         } else if announce {
             self.set_info(format!("Server reachable: {}", report.summary()));
         }
@@ -703,6 +713,19 @@ impl LauncherApp {
         let Some(report) = &self.last_connectivity else {
             return;
         };
+        // Only show a result that still describes the *currently selected*
+        // server. Switching the combo box or editing the custom-address
+        // field leaves the previous report in place, and rendering it
+        // unqualified would present server A's green ticks as if they
+        // described server B — the exact wrong attribution this feature
+        // exists to prevent.
+        if self.resolved_server_address().as_deref() != Some(report.address.as_str()) {
+            return;
+        }
+        if report.probes.is_empty() {
+            ui.colored_label(theme::warn(ui.visuals()), "connection probe did not run");
+            return;
+        }
         for probe in &report.probes {
             let ok = probe.outcome.is_open();
             let advisory = matches!(probe.role, PortRole::Map);

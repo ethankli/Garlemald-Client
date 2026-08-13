@@ -27,9 +27,10 @@
 //! stack; the real function's `ret N` returns directly to the caller,
 //! so our thunks are transparent to stdcall semantics at any arity.
 //!
-//! The six names we *do* intercept (`send`, `recv`, `WSASend`,
-//! `WSARecv`, `connect`, `closesocket`) live in `lib.rs` — not here —
-//! because they need logging side-effects around the forward.
+//! The eight names we *do* intercept (`send`, `recv`, `WSASend`,
+//! `WSARecv`, `connect`, `closesocket`, `bind`, `listen`) live in
+//! `lib.rs` — not here — because they need logging side-effects around
+//! the forward.
 
 #![allow(non_upper_case_globals)]
 
@@ -479,7 +480,7 @@ unsafe fn resolve_all(h: HMODULE) {
     let _ = h as *mut c_void;
 }
 
-/// Exposed so `real::bind()` (the six hooks' pointer table) can reuse
+/// Exposed so `real::bind()` (the hooks' pointer table) can reuse
 /// the same resolution and not re-load the DLL twice.
 pub fn system_ws2_32_handle() -> Option<HMODULE> {
     unsafe {

@@ -2,7 +2,7 @@
 //!
 //! Our DLL sits next to `ffxivgame.patched.exe` so the loader picks us
 //! up first whenever the exe does `LoadLibrary("ws2_32.dll")` or
-//! resolves an import-table entry. To forward the six functions we
+//! resolves an import-table entry. To forward the eight functions we
 //! wrap to the real implementation, we need to find the real DLL and
 //! `GetProcAddress` each symbol.
 //!
@@ -114,7 +114,7 @@ pub fn bind() {
 }
 
 /// Resolve a named export against the real DLL. Returns `None` when
-/// `GetProcAddress` hands back null — which, for the six names we ask
+/// `GetProcAddress` hands back null — which, for the names we ask
 /// for, shouldn't happen on any shipped Windows build.
 fn resolve<F>(handle: HMODULE, name: &core::ffi::CStr) -> Option<F> {
     let raw = unsafe { GetProcAddress(handle, name.as_ptr() as *const u8) };

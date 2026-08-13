@@ -75,6 +75,7 @@ Single crate, `src/`:
 | `platform/`       | Per-OS support: native Win32 on Windows, managed Wine on macOS/Linux                              |
 | `torrent/`        | BitTorrent patch transport: magnet endpoint client + librqbit session service (download, then opt-out seeding) |
 | `install_check.rs`| The 1.23b install gate: NotFound / FoundNeedsPatch / Ready; login and launch are blocked until Ready |
+| `connectivity.rs` | Pre-flight TCP probe of the selected server's lobby/world/map ports; diagnostic only, never gates the launch |
 | `config/`         | Config/data paths (`directories`) and `preferences.toml`                                          |
 | `version.rs`      | The launcher version and the FFXIV boot/game version constants                                    |
 | `main.rs` / `lib.rs` | Entry point + the `run()` that wires the GUI; the `--login-webview` subcommand                 |
@@ -151,7 +152,7 @@ backend. See [Platform support](#platform-support).
 
 ## Client ↔ server communication
 
-The launcher touches the server in three narrow places. Everything else is the
+The launcher touches the server in four narrow places. Everything else is the
 **game's** job after launch.
 
 ### 1. Login (WebView → custom scheme)
@@ -184,8 +185,8 @@ independent of which game server you pick.
 
 ### 3. Launch handoff (encrypted argv)
 
-The launcher never opens a game socket itself. Instead it bakes the destination and
-session into the game it starts:
+The launcher never speaks the game protocol itself — it opens no game *session*.
+Instead it bakes the destination and session into the game it starts:
 
 - `crypto/` (`build_launch_arguments`) builds the game's launch argument string
   (language/region/server-UTC/**session id**), derives a **Blowfish** key from a
@@ -195,6 +196,29 @@ session into the game it starts:
 - The game then connects to that server's **lobby (54994) → world (54992) → map
   (1989)** with the handed-off session. The hard client-version gate is satisfied
   because the install was patched to `2012.09.19.0001`.
+
+### 4. Pre-flight connectivity probe (diagnostic only)
+
+`connectivity.rs` opens a short-lived TCP connection to the selected server's
+**lobby (54994)**, **world (54992)** and **map (1989)** ports and immediately drops
+it. It speaks no protocol and carries no session — it exists purely to tell a player
+*which* port is unreachable, and it never gates or delays the launch.
+
+It runs on a background thread from two places: the **Check connection** button, and
+automatically when the player clicks Launch (reporting failures only). Each port is
+classified as open / refused (host up, nothing listening) / timed out (blocked or
+unforwarded) / DNS-failed, and every address a hostname resolves to is raced, so a
+host that publishes an unreachable address alongside a good one is not misreported.
+
+The **map port is advisory**: garlemald-server has the game dial the map service
+directly, but other server implementations relay map traffic behind the world
+listener and never expose 1989, so a filtered map port there is normal and never
+fails the verdict.
+
+> This is the answer to a class of bug report that is otherwise undiagnosable: when
+> a player cannot connect, the server sees an auth hit with no lobby connection
+> following, which looks identical for a wrong password, a client that never
+> launched, and a blocked port.
 
 ---
 

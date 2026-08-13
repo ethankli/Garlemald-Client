@@ -18,8 +18,18 @@ Lua-error reports.
 - `recv` / `WSARecv`  → log + forward
 - `connect`           → log + forward
 - `closesocket`       → log + forward
+- `bind`              → log + forward
+- `listen`            → log + forward
 
-All other ws2_32 exports pass through untouched via PE forwarding.
+`bind` and `listen` are hooked to answer, by measurement rather than
+assumption, whether the 1.23b client binds any fixed *local* ports — the
+client makes outbound connections to the server, so a local bind would be
+unusual, and a clash with another process would be a client-side failure
+indistinguishable (from the server's side) from a blocked port. When
+either call fails, its record carries a `WSAGetLastError=<n>`
+continuation line; a port clash is `WSAEADDRINUSE`, 10048.
+
+Every other ws2_32 export passes through untouched via PE forwarding.
 
 ## Log file
 

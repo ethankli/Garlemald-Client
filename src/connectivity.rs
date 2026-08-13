@@ -113,6 +113,11 @@ pub struct PortProbe {
     pub role: PortRole,
     pub port: u16,
     pub outcome: ProbeOutcome,
+    /// The resolved address that produced `outcome` — the one that
+    /// answered when open, or the one whose error was reported. `None`
+    /// when resolution itself failed. Disambiguates IPv4 from IPv6 in
+    /// the log line when a host publishes both.
+    pub addr: Option<SocketAddr>,
     /// Wall time the probe took (round-trip on success, the full timeout
     /// on `TimedOut`).
     pub elapsed: Duration,
@@ -129,19 +134,33 @@ impl ConnectivityReport {
     /// True when every port the game *requires* answered: lobby and
     /// world. The map probe is advisory (see module docs) and never
     /// fails the verdict.
+    ///
+    /// Both required roles must be *present* and open — a bare `all()`
+    /// over the list would return true for a report with no probes at
+    /// all (vacuous truth), turning a probe that never ran into a
+    /// confident "server reachable".
     pub fn game_ports_ok(&self) -> bool {
-        self.probes
-            .iter()
-            .filter(|p| matches!(p.role, PortRole::Lobby | PortRole::World))
-            .all(|p| p.outcome.is_open())
+        [PortRole::Lobby, PortRole::World].iter().all(|role| {
+            self.probes
+                .iter()
+                .any(|p| p.role == *role && p.outcome.is_open())
+        })
     }
 
-    /// One-line human summary, for logs and the GUI status row.
+    /// One-line human summary, for logs and the GUI status row. The
+    /// answering address is included when it differs from the host the
+    /// user typed, so a v4/v6 split is visible in a pasted log.
     pub fn summary(&self) -> String {
+        if self.probes.is_empty() {
+            return format!("{} — probe did not run", self.address);
+        }
         let parts: Vec<String> = self
             .probes
             .iter()
-            .map(|p| format!("{} {}: {}", p.role, p.port, p.outcome))
+            .map(|p| match p.addr {
+                Some(addr) => format!("{} {} [{}]: {}", p.role, p.port, addr.ip(), p.outcome),
+                None => format!("{} {}: {}", p.role, p.port, p.outcome),
+            })
             .collect();
         format!("{} — {}", self.address, parts.join("; "))
     }
@@ -157,7 +176,73 @@ fn classify_error(err: &std::io::Error) -> ProbeOutcome {
     }
 }
 
-/// Probe one `host:port` with a bounded connect.
+/// How informative an outcome is when several addresses disagree, worst
+/// (0) to best. `Refused` outranks `TimedOut` because it is *definitive*
+/// — the host answered, so the network path is fine and only the service
+/// is missing — where a timeout cannot distinguish a firewall from a
+/// down host.
+fn outcome_rank(outcome: &ProbeOutcome) -> u8 {
+    match outcome {
+        ProbeOutcome::Open => 4,
+        ProbeOutcome::Refused => 3,
+        ProbeOutcome::Error(_) => 2,
+        ProbeOutcome::TimedOut => 1,
+        ProbeOutcome::ResolveFailed(_) => 0,
+    }
+}
+
+/// Race every resolved address for one port and report the best answer.
+///
+/// A hostname can resolve to several addresses (round-robin A records, or
+/// an AAAA the local box has no route to). Probing only the first would
+/// report a reachable server as unreachable whenever the resolver happens
+/// to order a dead address first — the game itself walks the whole list,
+/// so the diagnostic must too, or it manufactures exactly the false
+/// verdict it exists to prevent.
+///
+/// The addresses are raced concurrently rather than tried in sequence so
+/// the worst-case wall time stays one `timeout` regardless of how many
+/// addresses the host publishes.
+fn probe_addrs(addrs: &[SocketAddr], timeout: Duration) -> (ProbeOutcome, Option<SocketAddr>) {
+    if addrs.is_empty() {
+        return (
+            ProbeOutcome::ResolveFailed("no addresses returned".to_string()),
+            None,
+        );
+    }
+    let mut results: Vec<(ProbeOutcome, SocketAddr)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = addrs
+            .iter()
+            .map(|&addr| {
+                scope.spawn(move || {
+                    let outcome = match TcpStream::connect_timeout(&addr, timeout) {
+                        Ok(_stream) => ProbeOutcome::Open,
+                        Err(e) => classify_error(&e),
+                    };
+                    (outcome, addr)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|h| h.join().ok())
+            .collect::<Vec<_>>()
+    });
+    // Every join failed (all probe threads panicked) — report it rather
+    // than silently claiming the host resolved to nothing.
+    if results.is_empty() {
+        return (
+            ProbeOutcome::Error("probe threads panicked".to_string()),
+            None,
+        );
+    }
+    results.sort_by_key(|(outcome, _)| std::cmp::Reverse(outcome_rank(outcome)));
+    let (outcome, addr) = results.remove(0);
+    (outcome, Some(addr))
+}
+
+/// Probe one `host:port` with a bounded connect across every address the
+/// host resolves to.
 fn probe_port(host: &str, role: PortRole, port: u16, timeout: Duration) -> PortProbe {
     let started = Instant::now();
     let addrs: Vec<SocketAddr> = match (host, port).to_socket_addrs() {
@@ -167,26 +252,17 @@ fn probe_port(host: &str, role: PortRole, port: u16, timeout: Duration) -> PortP
                 role,
                 port,
                 outcome: ProbeOutcome::ResolveFailed(e.to_string()),
+                addr: None,
                 elapsed: started.elapsed(),
             };
         }
     };
-    let Some(addr) = addrs.first() else {
-        return PortProbe {
-            role,
-            port,
-            outcome: ProbeOutcome::ResolveFailed("no addresses returned".to_string()),
-            elapsed: started.elapsed(),
-        };
-    };
-    let outcome = match TcpStream::connect_timeout(addr, timeout) {
-        Ok(_stream) => ProbeOutcome::Open,
-        Err(e) => classify_error(&e),
-    };
+    let (outcome, addr) = probe_addrs(&addrs, timeout);
     PortProbe {
         role,
         port,
         outcome,
+        addr,
         elapsed: started.elapsed(),
     }
 }
@@ -203,15 +279,26 @@ pub fn probe_server(address: &str, timeout: Duration) -> ConnectivityReport {
     let probes = std::thread::scope(|scope| {
         let handles: Vec<_> = roles
             .iter()
-            .map(|&(role, port)| scope.spawn(move || probe_port(address, role, port, timeout)))
+            .map(|&(role, port)| {
+                (
+                    role,
+                    port,
+                    scope.spawn(move || probe_port(address, role, port, timeout)),
+                )
+            })
             .collect();
         handles
             .into_iter()
-            .map(|h| {
+            .map(|(role, port, h)| {
+                // Keep the role/port of the probe that actually died: a
+                // fallback that always claimed `Lobby` would turn a
+                // panicked *map* probe into a false lobby failure, and
+                // lobby failures are what block the launch verdict.
                 h.join().unwrap_or_else(|_| PortProbe {
-                    role: PortRole::Lobby,
-                    port: 0,
+                    role,
+                    port,
                     outcome: ProbeOutcome::Error("probe thread panicked".to_string()),
+                    addr: None,
                     elapsed: Duration::ZERO,
                 })
             })
@@ -228,6 +315,14 @@ pub fn probe_server(address: &str, timeout: Duration) -> ConnectivityReport {
 /// `try_recv` every frame until the result lands).
 pub struct ConnectivityTask {
     rx: std::sync::mpsc::Receiver<ConnectivityReport>,
+    /// The address being probed, so a caller can tell whether a landed
+    /// report still describes the server currently selected.
+    address: String,
+    /// Set once a report has been handed out. The worker drops its
+    /// sender as it exits, so without this latch the poll *after* a
+    /// successful receive would see `Disconnected` and synthesise a
+    /// second, failed report — overwriting the real one.
+    delivered: bool,
     /// Whether the GUI should surface a success as an info message
     /// (a user-initiated check) or stay quiet about it (an automatic
     /// pre-launch probe, where only failures matter).
@@ -237,22 +332,49 @@ pub struct ConnectivityTask {
 impl ConnectivityTask {
     pub fn spawn(address: String, timeout: Duration, announce_success: bool) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::Builder::new()
+        let probe_address = address.clone();
+        // A failed spawn must not take the GUI down with it: the dropped
+        // sender disconnects the channel, which `try_recv` reports as a
+        // failed probe on the next poll.
+        if let Err(e) = std::thread::Builder::new()
             .name("connectivity-probe".to_string())
             .spawn(move || {
                 // A dropped receiver (task discarded mid-probe) is fine.
-                let _ = tx.send(probe_server(&address, timeout));
+                let _ = tx.send(probe_server(&probe_address, timeout));
             })
-            .expect("spawning the connectivity probe thread");
+        {
+            log::warn!("could not spawn the connectivity probe thread: {e}");
+        }
         Self {
             rx,
+            address,
+            delivered: false,
             announce_success,
         }
     }
 
     /// Non-blocking: `Some(report)` exactly once, when the probe finishes.
+    ///
+    /// A worker that ended without sending (only reachable if the OS
+    /// refused to spawn a thread) disconnects the channel; that is
+    /// surfaced as a synthetic failed report rather than folded into the
+    /// `Empty` case, because a caller that polls until `Some` would
+    /// otherwise wait forever — wedging its "in flight" flag and any
+    /// repaint loop keyed to it.
     pub fn try_recv(&mut self) -> Option<ConnectivityReport> {
-        self.rx.try_recv().ok()
+        if self.delivered {
+            return None;
+        }
+        let report = match self.rx.try_recv() {
+            Ok(report) => report,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => ConnectivityReport {
+                address: self.address.clone(),
+                probes: Vec::new(),
+            },
+        };
+        self.delivered = true;
+        Some(report)
     }
 }
 
@@ -289,12 +411,66 @@ mod tests {
         assert!(matches!(probe.outcome, ProbeOutcome::ResolveFailed(_)));
     }
 
+    /// A hostname resolving to a dead address *ahead* of a live one is
+    /// the regression that matters: probing only the first would call a
+    /// reachable server unreachable. Driving `probe_addrs` directly
+    /// makes it deterministic without depending on the host resolver.
+    #[test]
+    fn a_dead_address_ahead_of_a_live_one_still_reports_open() {
+        let live = TcpListener::bind("127.0.0.1:0").expect("bind live listener");
+        let live_addr = live.local_addr().unwrap();
+
+        // Bind-then-drop: a real address that refuses immediately.
+        let dead = TcpListener::bind("127.0.0.1:0").expect("bind dead listener");
+        let dead_addr = dead.local_addr().unwrap();
+        drop(dead);
+
+        let (outcome, answered) = probe_addrs(&[dead_addr, live_addr], FAST);
+        assert_eq!(outcome, ProbeOutcome::Open);
+        assert_eq!(answered, Some(live_addr), "the live address should answer");
+    }
+
+    #[test]
+    fn all_addresses_dead_reports_the_most_definitive_outcome() {
+        let dead = TcpListener::bind("127.0.0.1:0").expect("bind dead listener");
+        let dead_addr = dead.local_addr().unwrap();
+        drop(dead);
+        // 203.0.113.0/24 is TEST-NET-3 (RFC 5737) — reserved for
+        // documentation and never routed, so it cannot answer.
+        let blackhole: SocketAddr = "203.0.113.1:54994".parse().unwrap();
+
+        let (outcome, _) = probe_addrs(&[blackhole, dead_addr], Duration::from_millis(600));
+        // Refused outranks TimedOut: it proves the host is up, which is
+        // the more actionable of the two for an operator.
+        assert_eq!(outcome, ProbeOutcome::Refused);
+    }
+
+    #[test]
+    fn no_addresses_reports_resolve_failed() {
+        let (outcome, addr) = probe_addrs(&[], FAST);
+        assert!(matches!(outcome, ProbeOutcome::ResolveFailed(_)));
+        assert!(addr.is_none());
+    }
+
+    #[test]
+    fn empty_report_is_not_treated_as_reachable() {
+        // A probe that never ran must not read as "server reachable" —
+        // `all()` over an empty list is vacuously true, so the verdict
+        // has to require both roles to be present.
+        let report = ConnectivityReport {
+            address: "test".into(),
+            probes: Vec::new(),
+        };
+        assert!(!report.game_ports_ok());
+    }
+
     #[test]
     fn verdict_requires_lobby_and_world_but_not_map() {
         let mk = |role, outcome| PortProbe {
             role,
             port: 0,
             outcome,
+            addr: None,
             elapsed: Duration::ZERO,
         };
         let report = ConnectivityReport {
@@ -322,8 +498,8 @@ mod tests {
 
     #[test]
     fn task_delivers_exactly_one_report() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
-        let _keep = &listener;
+        // Probes the real fixed game ports on loopback; whatever they
+        // answer, the task must deliver exactly one three-probe report.
         let mut task = ConnectivityTask::spawn("127.0.0.1".to_string(), FAST, true);
         let deadline = Instant::now() + Duration::from_secs(10);
         let report = loop {
@@ -346,6 +522,7 @@ mod tests {
                 role: PortRole::Lobby,
                 port: LOBBY_PORT,
                 outcome: ProbeOutcome::TimedOut,
+                addr: Some("192.0.2.7:54994".parse().unwrap()),
                 elapsed: Duration::ZERO,
             }],
         };
@@ -353,5 +530,8 @@ mod tests {
         assert!(s.contains("bahamut.example"));
         assert!(s.contains("lobby 54994"));
         assert!(s.contains("timed out"));
+        // The answering address is what disambiguates a v4/v6 split in a
+        // pasted log, so it must survive into the summary line.
+        assert!(s.contains("192.0.2.7"));
     }
 }

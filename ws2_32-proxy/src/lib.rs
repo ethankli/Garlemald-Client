@@ -10,8 +10,9 @@
 //!   doesn't recurse into *us*) and resolve function pointers for every
 //!   export we wrap.
 //! - The wrapped exports (`send`, `recv`, `WSASend`, `WSARecv`, `connect`,
-//!   `closesocket`) log the call parameters to `<game_dir>/ws2_32-trace.log`
-//!   and then delegate to the real function.
+//!   `closesocket`, `bind`, `listen`) log the call parameters to
+//!   `<game_dir>/ws2_32-trace.log` and then delegate to the real function.
+//!   `bind`/`listen` additionally record `WSAGetLastError` on failure.
 //! - Every *other* ws2_32 export is forwarded to the real DLL via PE
 //!   `FORWARD` export entries in `ws2_32.def`. We never see those calls in
 //!   our process, so they can't pay the logging overhead.
@@ -76,7 +77,7 @@ pub extern "system" fn DllMain(
 ) -> BOOL {
     match fdw_reason {
         DLL_PROCESS_ATTACH => {
-            // Bind both the six hook pointers and the ~120 JMP-thunk
+            // Bind both the eight hook pointers and the ~120 JMP-thunk
             // pointers. `thunks::bind_all` loads the real ws2_32 via
             // an absolute syswow64 path and resolves every symbol we
             // forward; `real::bind` piggy-backs on the same handle

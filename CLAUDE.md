@@ -76,6 +76,7 @@ Single crate, `src/`:
 | `platform/`     | per-OS: `windows.rs` (native Win32), `macos.rs`/`linux.rs` + `wine.rs` (managed Wine) |
 | `torrent/`      | BitTorrent patch transport: magnet endpoint + librqbit download/seed service      |
 | `install_check.rs` | 1.23b install gate blocking login/launch until patched                        |
+| `connectivity.rs` | pre-flight TCP probe of the server's lobby/world/map ports (diagnostic; never gates launch) |
 | `config/`       | `paths.rs`, `preferences.rs`                                                      |
 | `version.rs`    | launcher version + `FFXIV_BOOT_VERSION` / `FFXIV_GAME_VERSION`                    |
 

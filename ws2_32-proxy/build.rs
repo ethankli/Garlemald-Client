@@ -1,7 +1,7 @@
 //! Build glue.
 //!
 //! Points the MinGW linker at our `ws2_32.def` so the resulting DLL
-//! carries the forwarded exports alongside the six we define in Rust.
+//! carries the forwarded exports alongside the eight we define in Rust.
 //! Without this the DLL would only expose `send`/`recv`/`WSASend`/
 //! `WSARecv`/`connect`/`closesocket` and the game would fail to load
 //! the first time it tried to resolve any of the dozens of other
