@@ -31,6 +31,7 @@ use crate::config::{
     Preferences, bundled_config_path, default_torrent_storage_dir, preferences_file_path,
     torrent_session_dir,
 };
+use crate::connectivity::{ConnectivityReport, ConnectivityTask, PortRole, ProbeOutcome};
 use crate::install_check::{self, InstallState, InstallStatus};
 use crate::launcher::GameLaunchRequest;
 use crate::login::{LoginOutcome, LoginTask};
@@ -90,6 +91,10 @@ struct LauncherApp {
     install_status: InstallStatus,
     last_install_check: Instant,
     torrent_apply_attempted: bool,
+    /// In-flight background probe of the selected server's game ports.
+    connectivity_task: Option<ConnectivityTask>,
+    /// Most recent probe result, rendered under the server selector.
+    last_connectivity: Option<ConnectivityReport>,
 }
 
 impl LauncherApp {
@@ -172,6 +177,8 @@ impl LauncherApp {
             install_status,
             last_install_check: Instant::now(),
             torrent_apply_attempted: false,
+            connectivity_task: None,
+            last_connectivity: None,
         };
         app.outdated_prompt_open = app.game_is_installed_but_outdated();
         app
@@ -528,6 +535,11 @@ impl LauncherApp {
             self.set_error("No server address selected.");
             return;
         }
+        // Pre-flight the game ports concurrently with the login flow: the
+        // result lands while the user is at the login form, so a blocked
+        // lobby/world port surfaces as a named error before they sit
+        // through a silent in-game hang. Never delays the launch.
+        self.start_connectivity_check(false);
         let Some(login_url) = self.resolved_login_url() else {
             // No login webview supplied: fall back to the native JSON
             // login/sign-up form when the server exposes an auth API.
@@ -597,8 +609,66 @@ impl LauncherApp {
             ));
             return;
         }
+        // Same pre-flight as the login path (failures-only messaging).
+        self.start_connectivity_check(false);
         self.save_preferences();
         self.launch_game_with_session(session_id);
+    }
+
+    /// Probe the selected server's game ports on a background thread.
+    /// `announce_success` distinguishes a user-clicked check (report both
+    /// ways) from the automatic pre-launch probe (failures only — a
+    /// success there must not overwrite launch-flow messages).
+    fn start_connectivity_check(&mut self, announce_success: bool) {
+        if self.connectivity_task.is_some() {
+            return;
+        }
+        let Some(address) = self.resolved_server_address() else {
+            if announce_success {
+                self.set_error("No server address selected.");
+            }
+            return;
+        };
+        self.last_connectivity = None;
+        self.connectivity_task = Some(ConnectivityTask::spawn(
+            address,
+            Duration::from_secs(4),
+            announce_success,
+        ));
+    }
+
+    fn poll_connectivity_task(&mut self) {
+        let Some(task) = self.connectivity_task.as_mut() else {
+            return;
+        };
+        let Some(report) = task.try_recv() else {
+            return;
+        };
+        let announce = task.announce_success;
+        self.connectivity_task = None;
+        log::info!("connectivity: {}", report.summary());
+        if !report.game_ports_ok() {
+            // Name the exact port and failure mode: this line is what a
+            // player screenshots when "it just hangs" — the whole point
+            // of the pre-flight (the 2026-08 bahamut net test produced
+            // auth hits with no lobby follow-up and nothing to diagnose
+            // with on either end).
+            let bad: Vec<String> = report
+                .probes
+                .iter()
+                .filter(|p| matches!(p.role, PortRole::Lobby | PortRole::World))
+                .filter(|p| !p.outcome.is_open())
+                .map(|p| format!("{} port {}: {}", p.role, p.port, p.outcome))
+                .collect();
+            self.set_error(format!(
+                "Cannot reach {} — {}. The game will not get past character select.",
+                report.address,
+                bad.join("; ")
+            ));
+        } else if announce {
+            self.set_info(format!("Server reachable: {}", report.summary()));
+        }
+        self.last_connectivity = Some(report);
     }
 
     fn poll_login_task(&mut self) {
@@ -622,6 +692,33 @@ impl LauncherApp {
             LoginOutcome::Error(msg) => {
                 self.set_error(format!("Login failed: {msg}"));
             }
+        }
+    }
+
+    /// The per-port status row under the server selector. Lobby/world
+    /// color by outcome; the map probe renders in the weak text color
+    /// when unreachable, because relay-topology servers (e.g. bahamut)
+    /// never expose it — that's normal, not a fault.
+    fn render_connectivity_inline(&self, ui: &mut egui::Ui) {
+        let Some(report) = &self.last_connectivity else {
+            return;
+        };
+        for probe in &report.probes {
+            let ok = probe.outcome.is_open();
+            let advisory = matches!(probe.role, PortRole::Map);
+            let text = match (&probe.outcome, advisory) {
+                (ProbeOutcome::Open, _) => format!("{} ✓", probe.role),
+                (_, true) => format!("{} — (not used by all servers)", probe.role),
+                (outcome, false) => format!("{} {}: {}", probe.role, probe.port, outcome),
+            };
+            let color = if ok {
+                theme::success(ui.visuals())
+            } else if advisory {
+                ui.visuals().weak_text_color()
+            } else {
+                theme::error(ui.visuals())
+            };
+            ui.colored_label(color, text);
         }
     }
 
@@ -668,6 +765,22 @@ impl LauncherApp {
         ui.horizontal(|ui| {
             ui.label("Custom address:");
             ui.text_edit_singleline(&mut self.manual_server_address);
+        });
+
+        ui.horizontal(|ui| {
+            let checking = self.connectivity_task.is_some();
+            let label = if checking {
+                "Checking…"
+            } else {
+                "Check connection"
+            };
+            if ui
+                .add_enabled(!checking, egui::Button::new(label))
+                .clicked()
+            {
+                self.start_connectivity_check(true);
+            }
+            self.render_connectivity_inline(ui);
         });
 
         ui.separator();
@@ -873,6 +986,7 @@ impl LauncherApp {
 impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_login_task();
+        self.poll_connectivity_task();
 
         let on_main_screen = matches!(self.screen, Screen::Main);
         if on_main_screen && self.last_install_check.elapsed() >= Duration::from_secs(3) {
@@ -925,6 +1039,12 @@ impl eframe::App for LauncherApp {
 
         // Keep polling while a login subprocess is in flight.
         if self.login_task.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+
+        // Keep polling while a connectivity probe is in flight so its
+        // result lands without waiting for the next input event.
+        if self.connectivity_task.is_some() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
 

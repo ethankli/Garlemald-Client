@@ -33,6 +33,9 @@ pub type SendFn = unsafe extern "system" fn(SOCKET, *const i8, i32, i32) -> i32;
 pub type RecvFn = unsafe extern "system" fn(SOCKET, *mut i8, i32, i32) -> i32;
 pub type ConnectFn = unsafe extern "system" fn(SOCKET, *const SOCKADDR, i32) -> i32;
 pub type CloseFn = unsafe extern "system" fn(SOCKET) -> i32;
+pub type BindFn = unsafe extern "system" fn(SOCKET, *const SOCKADDR, i32) -> i32;
+pub type ListenFn = unsafe extern "system" fn(SOCKET, i32) -> i32;
+pub type WsaGetLastErrorFn = unsafe extern "system" fn() -> i32;
 pub type WsaSendFn = unsafe extern "system" fn(
     SOCKET,
     *const WSABUF,
@@ -64,11 +67,14 @@ struct Resolved {
     closesocket: Option<CloseFn>,
     wsasend: Option<WsaSendFn>,
     wsarecv: Option<WsaRecvFn>,
+    sock_bind: Option<BindFn>,
+    listen: Option<ListenFn>,
+    wsa_get_last_error: Option<WsaGetLastErrorFn>,
 }
 
 static RESOLVED: OnceLock<Resolved> = OnceLock::new();
 
-/// Load the real DLL and resolve the six wrapped functions. Safe to
+/// Load the real DLL and resolve the eight wrapped functions. Safe to
 /// call more than once (the `OnceLock` swallows repeats). Called from
 /// `DllMain(PROCESS_ATTACH)` but also re-tried lazily from any hook
 /// in case a pathological load order skips the attach.
@@ -87,6 +93,9 @@ pub fn bind() {
                     closesocket: None,
                     wsasend: None,
                     wsarecv: None,
+                    sock_bind: None,
+                    listen: None,
+                    wsa_get_last_error: None,
                 };
             }
         };
@@ -97,6 +106,9 @@ pub fn bind() {
             closesocket: resolve(handle, c"closesocket"),
             wsasend: resolve(handle, c"WSASend"),
             wsarecv: resolve(handle, c"WSARecv"),
+            sock_bind: resolve(handle, c"bind"),
+            listen: resolve(handle, c"listen"),
+            wsa_get_last_error: resolve(handle, c"WSAGetLastError"),
         }
     });
 }
@@ -139,4 +151,13 @@ pub fn wsasend() -> Option<WsaSendFn> {
 }
 pub fn wsarecv() -> Option<WsaRecvFn> {
     resolved().and_then(|r| r.wsarecv)
+}
+pub fn sock_bind() -> Option<BindFn> {
+    resolved().and_then(|r| r.sock_bind)
+}
+pub fn listen() -> Option<ListenFn> {
+    resolved().and_then(|r| r.listen)
+}
+pub fn wsa_get_last_error() -> Option<WsaGetLastErrorFn> {
+    resolved().and_then(|r| r.wsa_get_last_error)
 }

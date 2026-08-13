@@ -208,6 +208,42 @@ pub unsafe extern "system" fn WSARecv(
     rc
 }
 
+/// The real `WSAGetLastError`, for annotating a failed `bind`/`listen`.
+/// Returns 0 if the pointer hasn't resolved (best-effort diagnostics).
+fn last_wsa_error() -> i32 {
+    match real::wsa_get_last_error() {
+        Some(f) => unsafe { f() },
+        None => 0,
+    }
+}
+
+/// `int bind(SOCKET s, const sockaddr *name, int namelen);`
+///
+/// Promoted from a pass-through JMP thunk to a logged hook so the trace
+/// definitively answers whether the 1.23b client binds fixed local ports.
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn bind(s: SOCKET, name: *const SOCKADDR, namelen: i32) -> i32 {
+    let rc = match real::sock_bind() {
+        Some(f) => unsafe { f(s, name, namelen) },
+        None => -1,
+    };
+    let err = if rc != 0 { last_wsa_error() } else { 0 };
+    log::log_bind(s, name, namelen, rc, err);
+    rc
+}
+
+/// `int listen(SOCKET s, int backlog);`
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn listen(s: SOCKET, backlog: i32) -> i32 {
+    let rc = match real::listen() {
+        Some(f) => unsafe { f(s, backlog) },
+        None => -1,
+    };
+    let err = if rc != 0 { last_wsa_error() } else { 0 };
+    log::log_listen(s, backlog, rc, err);
+    rc
+}
+
 // -------------------------------------------------------------------------
 // WSABUF — matches the Windows SDK shape. `windows-sys` exposes it under
 // `Win32::Networking::WinSock` but with `#[repr(C)]` fields we can't

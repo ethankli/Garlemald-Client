@@ -32,6 +32,7 @@ compile_error!(
 
 pub mod app;
 pub mod config;
+pub mod connectivity;
 pub mod crypto;
 pub mod install_check;
 pub mod launcher;

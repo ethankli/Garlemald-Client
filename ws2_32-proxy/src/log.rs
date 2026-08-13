@@ -239,6 +239,34 @@ pub fn log_closesocket(s: SOCKET, rc: i32) {
     write_line(&header("closesocket", s, 0, rc));
 }
 
+/// `bind`/`listen` are logged to settle the open question of whether the
+/// 1.23b client binds any fixed *local* ports. The client makes outbound
+/// connections to the server, so a local bind would be unusual — and if
+/// one clashed with another process it could surface as a client-side
+/// failure, which is exactly the "port already bound" hypothesis raised
+/// after the 2026-08 net test. The sockaddr is hex-dumped like `connect`
+/// so the bound port/address is recoverable; on failure the caller passes
+/// `WSAGetLastError()` so a clash (WSAEADDRINUSE = 10048) is visible.
+pub fn log_bind(s: SOCKET, name: *const SOCKADDR, namelen: i32, rc: i32, wsa_err: i32) {
+    let mut out = header("bind", s, namelen, rc);
+    if rc != 0 {
+        let _ = writeln!(out, "  WSAGetLastError={wsa_err}");
+    }
+    if !name.is_null() && namelen > 0 {
+        let slice = unsafe { core::slice::from_raw_parts(name as *const u8, namelen as usize) };
+        hex_dump(&mut out, slice);
+    }
+    write_line(&out);
+}
+
+pub fn log_listen(s: SOCKET, backlog: i32, rc: i32, wsa_err: i32) {
+    let mut out = header("listen", s, backlog, rc);
+    if rc != 0 {
+        let _ = writeln!(out, "  WSAGetLastError={wsa_err}");
+    }
+    write_line(&out);
+}
+
 pub fn log_wsasend(
     s: SOCKET,
     bufs: *const WSABUF,

@@ -82,9 +82,12 @@ macro_rules! real_slots {
 
 #[rustfmt::skip]
 real_slots! {
-    REAL_accept, REAL_bind, REAL_getpeername, REAL_getsockname,
+    // NB: `bind` and `listen` are logging hooks in `lib.rs` (they resolve
+    // their real pointers through `real.rs`, not these slots), so they are
+    // deliberately not listed here.
+    REAL_accept, REAL_getpeername, REAL_getsockname,
     REAL_getsockopt, REAL_htonl, REAL_htons, REAL_ioctlsocket,
-    REAL_inet_addr, REAL_inet_ntoa, REAL_listen, REAL_ntohl, REAL_ntohs,
+    REAL_inet_addr, REAL_inet_ntoa, REAL_ntohl, REAL_ntohs,
     REAL_recvfrom, REAL_select, REAL_sendto, REAL_setsockopt,
     REAL_shutdown, REAL_socket,
     REAL_FreeAddrInfoEx, REAL_FreeAddrInfoExW, REAL_FreeAddrInfoW,
@@ -154,7 +157,7 @@ macro_rules! thunk {
 }
 
 thunk!(accept, REAL_accept);
-thunk!(bind, REAL_bind);
+// `bind` — logging hook in lib.rs, not a thunk (would collide on symbol).
 thunk!(getpeername, REAL_getpeername);
 thunk!(getsockname, REAL_getsockname);
 thunk!(getsockopt, REAL_getsockopt);
@@ -163,7 +166,7 @@ thunk!(htons, REAL_htons);
 thunk!(ioctlsocket, REAL_ioctlsocket);
 thunk!(inet_addr, REAL_inet_addr);
 thunk!(inet_ntoa, REAL_inet_ntoa);
-thunk!(listen, REAL_listen);
+// `listen` — logging hook in lib.rs, not a thunk (would collide on symbol).
 thunk!(ntohl, REAL_ntohl);
 thunk!(ntohs, REAL_ntohs);
 thunk!(recvfrom, REAL_recvfrom);
@@ -336,7 +339,8 @@ macro_rules! resolve_one {
 unsafe fn resolve_all(h: HMODULE) {
     // ---- BSD sockets we don't hook ----
     resolve_one!(h, REAL_accept, c"accept");
-    resolve_one!(h, REAL_bind, c"bind");
+    // `bind`/`listen` resolve their real pointers in `real.rs` (they are
+    // logging hooks, not thunks), so no slot is resolved for them here.
     resolve_one!(h, REAL_getpeername, c"getpeername");
     resolve_one!(h, REAL_getsockname, c"getsockname");
     resolve_one!(h, REAL_getsockopt, c"getsockopt");
@@ -345,7 +349,6 @@ unsafe fn resolve_all(h: HMODULE) {
     resolve_one!(h, REAL_ioctlsocket, c"ioctlsocket");
     resolve_one!(h, REAL_inet_addr, c"inet_addr");
     resolve_one!(h, REAL_inet_ntoa, c"inet_ntoa");
-    resolve_one!(h, REAL_listen, c"listen");
     resolve_one!(h, REAL_ntohl, c"ntohl");
     resolve_one!(h, REAL_ntohs, c"ntohs");
     resolve_one!(h, REAL_recvfrom, c"recvfrom");
